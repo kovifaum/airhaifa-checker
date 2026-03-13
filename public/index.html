@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>✈️ Air Haifa Flight Checker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #080c14;
+      --surface: rgba(255,255,255,0.04);
+      --surface2: rgba(255,255,255,0.07);
+      --border: rgba(255,255,255,0.1);
+      --border2: rgba(255,255,255,0.15);
+      --text: #e8eaf6;
+      --text2: #8892a4;
+      --text3: #5b6478;
+      --blue: #3b82f6;
+      --blue2: #60a5fa;
+      --violet: #7c3aed;
+      --green: #10b981;
+      --green2: #34d399;
+      --red: #ef4444;
+      --amber: #f59e0b;
+      --radius: 16px;
+      --radius-sm: 10px;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* Animated background */
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% -10%, rgba(59,130,246,0.12) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 80% 100%, rgba(124,58,237,0.1) 0%, transparent 60%),
+        radial-gradient(ellipse 40% 40% at 50% 50%, rgba(16,185,129,0.04) 0%, transparent 60%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .wrapper { position: relative; z-index: 1; max-width: 960px; margin: 0 auto; padding: 40px 20px 80px; }
+
+    /* Header */
+    .header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+    .header-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 72px; height: 72px;
+      background: linear-gradient(135deg, var(--blue), var(--violet));
+      border-radius: 20px;
+      font-size: 36px;
+      margin-bottom: 20px;
+      box-shadow: 0 0 40px rgba(59,130,246,0.3);
+      animation: float 4s ease-in-out infinite;
+    }
+    @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+
+    .header h1 {
+      font-size: clamp(28px, 5vw, 42px);
+      font-weight: 800;
+      background: linear-gradient(135deg, #fff 0%, var(--blue2) 50%, #a78bfa 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1.2;
+      margin-bottom: 10px;
+    }
+    .header p {
+      color: var(--text2);
+      font-size: 16px;
+      max-width: 480px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+
+    /* Status bar */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 20px;
+      margin-bottom: 32px;
+      backdrop-filter: blur(12px);
+      flex-wrap: wrap;
+    }
+    .pulse {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--green2);
+      box-shadow: 0 0 0 0 rgba(52,211,153,0.4);
+      animation: pulse 2s infinite;
+      flex-shrink: 0;
+    }
+    .pulse.checking { background: var(--amber); box-shadow: 0 0 0 0 rgba(245,158,11,0.4); }
+    .pulse.idle { background: var(--text3); animation: none; }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(52,211,153,0.4); }
+      70% { box-shadow: 0 0 0 8px rgba(52,211,153,0); }
+      100% { box-shadow: 0 0 0 0 rgba(52,211,153,0); }
+    }
+    .status-text { font-size: 14px; color: var(--text2); flex: 1; }
+    .status-text strong { color: var(--text); }
+    .countdown {
+      font-size: 13px;
+      color: var(--text3);
+      font-variant-numeric: tabular-nums;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 4px 10px;
+    }
+    .btn-check-now {
+      background: transparent;
+      border: 1px solid var(--border2);
+      color: var(--text2);
+      font-size: 13px;
+      padding: 6px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: inherit;
+    }
+    .btn-check-now:hover { background: var(--surface2); color: var(--text); border-color: var(--blue); }
+
+    /* Add watch form */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(20px);
+      border-radius: var(--radius);
+      padding: 28px;
+      margin-bottom: 28px;
+    }
+    .card-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .card-title .icon {
+      width: 36px; height: 36px;
+      background: linear-gradient(135deg, rgba(59,130,246,0.2), rgba(124,58,237,0.2));
+      border: 1px solid rgba(59,130,246,0.3);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .form-group.full { grid-column: 1 / -1; }
+    label { font-size: 13px; font-weight: 500; color: var(--text2); }
+    input {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 14px;
+      padding: 11px 14px;
+      transition: all 0.2s;
+      outline: none;
+      width: 100%;
+    }
+    input::placeholder { color: var(--text3); }
+    input:focus { border-color: var(--blue); background: rgba(59,130,246,0.06); box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
+    input.error { border-color: var(--red); }
+
+    .form-hint { font-size: 12px; color: var(--text3); margin-top: 2px; }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--blue), var(--violet));
+      border: none;
+      border-radius: var(--radius-sm);
+      color: #fff;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 15px;
+      font-weight: 600;
+      padding: 13px 24px;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      margin-top: 4px;
+      position: relative;
+      overflow: hidden;
+    }
+    .btn-primary::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: rgba(255,255,255,0);
+      transition: background 0.2s;
+    }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(59,130,246,0.35); }
+    .btn-primary:hover::after { background: rgba(255,255,255,0.06); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .error-msg {
+      background: rgba(239,68,68,0.1);
+      border: 1px solid rgba(239,68,68,0.3);
+      border-radius: var(--radius-sm);
+      color: #fca5a5;
+      font-size: 13px;
+      padding: 10px 14px;
+      margin-top: 12px;
+      display: none;
+    }
+    .error-msg.show { display: block; }
+
+    /* Watches list */
+    .watches-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .watches-title { font-size: 18px; font-weight: 700; }
+    .watch-count {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 10px;
+      color: var(--text2);
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 48px 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text3);
+    }
+    .empty-state .emoji { font-size: 48px; display: block; margin-bottom: 12px; }
+    .empty-state p { font-size: 15px; }
+
+    .watch-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 14px;
+      backdrop-filter: blur(12px);
+      transition: border-color 0.3s, box-shadow 0.3s;
+      animation: slideIn 0.3s ease;
+    }
+    @keyframes slideIn { from { opacity:0; transform: translateY(-10px); } to { opacity:1; transform: translateY(0); } }
+    .watch-card.available { border-color: rgba(16,185,129,0.4); box-shadow: 0 0 24px rgba(16,185,129,0.08); }
+    .watch-card.not_available { border-color: rgba(239,68,68,0.2); }
+    .watch-card.checking { border-color: rgba(245,158,11,0.3); }
+    .watch-card.error { border-color: rgba(239,68,68,0.4); }
+
+    .watch-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+    .badge {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 5px 12px;
+      border-radius: 20px;
+      white-space: nowrap;
+    }
+    .badge.available { background: rgba(16,185,129,0.15); color: var(--green2); border: 1px solid rgba(16,185,129,0.3); }
+    .badge.not_available { background: rgba(239,68,68,0.1); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
+    .badge.checking { background: rgba(245,158,11,0.1); color: #fcd34d; border: 1px solid rgba(245,158,11,0.2); }
+    .badge.pending { background: rgba(148,163,184,0.1); color: var(--text3); border: 1px solid var(--border); }
+    .badge.error { background: rgba(239,68,68,0.1); color: #fca5a5; border: 1px solid rgba(239,68,68,0.2); }
+
+    .watch-info { flex: 1; min-width: 0; }
+    .watch-url {
+      font-size: 13px;
+      color: var(--blue2);
+      word-break: break-all;
+      text-decoration: none;
+      line-height: 1.4;
+    }
+    .watch-url:hover { text-decoration: underline; }
+    .watch-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 8px;
+    }
+    .watch-meta-item {
+      font-size: 12px;
+      color: var(--text3);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .watch-actions { display: flex; gap: 8px; align-items: center; }
+    .btn-icon {
+      width: 32px; height: 32px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text3);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      transition: all 0.2s;
+    }
+    .btn-icon:hover { background: var(--surface2); color: var(--text); border-color: var(--border2); }
+    .btn-icon.danger:hover { background: rgba(239,68,68,0.1); color: #f87171; border-color: rgba(239,68,68,0.3); }
+
+    /* Availability details */
+    .availability-details {
+      background: rgba(16,185,129,0.06);
+      border: 1px solid rgba(16,185,129,0.2);
+      border-radius: var(--radius-sm);
+      padding: 14px;
+      margin-top: 12px;
+    }
+    .availability-details h4 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--green2);
+      margin-bottom: 10px;
+    }
+    .flight-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(16,185,129,0.1);
+      font-size: 13px;
+    }
+    .flight-row:last-child { border-bottom: none; }
+    .flight-num { font-weight: 700; color: var(--text); }
+    .flight-route { color: var(--text2); }
+    .flight-seats { color: var(--green2); font-weight: 600; }
+    .flight-price { color: var(--amber); font-size: 12px; }
+
+    .notified-banner {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(124,58,237,0.1);
+      border: 1px solid rgba(124,58,237,0.25);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      margin-top: 10px;
+      font-size: 13px;
+      color: #c4b5fd;
+    }
+
+    .error-detail {
+      background: rgba(239,68,68,0.08);
+      border: 1px solid rgba(239,68,68,0.2);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      margin-top: 10px;
+      font-size: 12px;
+      color: #fca5a5;
+      font-family: monospace;
+      word-break: break-all;
+    }
+
+    /* Notifications setup guide */
+    .setup-guide {
+      background: rgba(245,158,11,0.05);
+      border: 1px solid rgba(245,158,11,0.2);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 28px;
+    }
+    .setup-guide h3 {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--amber);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .setup-guide ul {
+      list-style: none;
+      font-size: 13px;
+      color: var(--text2);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .setup-guide li { display: flex; align-items: flex-start; gap: 8px; line-height: 1.5; }
+    .setup-guide a { color: var(--blue2); }
+    .setup-guide code {
+      background: rgba(255,255,255,0.08);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 12px;
+      font-family: monospace;
+    }
+
+    /* Responsive */
+    @media (max-width: 600px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .form-group.full { grid-column: 1; }
+      .watch-header { flex-wrap: wrap; }
+    }
+
+    /* Loading spinner */
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Toast */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: var(--surface2);
+      border: 1px solid var(--border2);
+      backdrop-filter: blur(20px);
+      border-radius: 12px;
+      padding: 12px 20px;
+      font-size: 14px;
+      color: var(--text);
+      z-index: 1000;
+      transition: transform 0.3s ease;
+      white-space: nowrap;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    #toast.show { transform: translateX(-50%) translateY(0); }
+    #toast.success { border-color: rgba(16,185,129,0.4); }
+    #toast.error-toast { border-color: rgba(239,68,68,0.4); }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <!-- Header -->
+    <div class="header">
+      <div class="header-icon">✈️</div>
+      <h1>Air Haifa Flight Checker</h1>
+      <p>Automatically monitors flight availability every 60 seconds and alerts you the moment seats open up.</p>
+    </div>
+
+    <!-- Live status bar -->
+    <div class="status-bar" id="statusBar">
+      <div class="pulse idle" id="pulseIndicator"></div>
+      <div class="status-text" id="statusText"><strong>Ready</strong> — Add a flight URL to start monitoring</div>
+      <div class="countdown" id="countdown" style="display:none">Next check in <span id="countdownVal">60</span>s</div>
+      <button class="btn-check-now" onclick="checkNow()" id="btnCheckNow" style="display:none">Check Now</button>
+    </div>
+
+    <!-- Setup guide (only shown when .env not configured) -->
+    <div class="setup-guide" id="setupGuide">
+      <h3>⚠️ Notification Setup Required (one-time)</h3>
+      <ul>
+        <li>📧 <span>Email: Copy <code>.env.example</code> to <code>.env</code> and add your Gmail + <a href="https://myaccount.google.com/apppasswords" target="_blank">App Password</a></span></li>
+        <li>📱 <span>SMS: Add your <a href="https://console.twilio.com" target="_blank">Twilio</a> credentials to <code>.env</code> (free trial works)</span></li>
+        <li>🔄 <span>Restart the server after editing <code>.env</code></span></li>
+      </ul>
+    </div>
+
+    <!-- Add watch form -->
+    <div class="card">
+      <div class="card-title">
+        <div class="icon">+</div>
+        Add Flight to Monitor
+      </div>
+      <div class="form-grid">
+        <div class="form-group full">
+          <label for="urlInput">Air Haifa Flight URL</label>
+          <input type="url" id="urlInput" placeholder="https://airhaifa.com/flight-results/TLV-ATH/2026-03-15/..." />
+          <div class="form-hint">Paste the URL directly from airhaifa.com flight results page</div>
+        </div>
+        <div class="form-group">
+          <label for="emailInput">Email Address(es)</label>
+          <input type="email" id="emailInput" value="kovifaum@gmail.com" placeholder="you@example.com, other@email.com" multiple />
+          <div class="form-hint">Separate multiple emails with commas</div>
+        </div>
+        <div class="form-group">
+          <label for="vtextInput">Verizon Phone Number (SMS)</label>
+          <input type="tel" id="vtextInput" placeholder="1234567890" />
+          <div class="form-hint">10 digits only (e.g. 8482100430). No Twilio required!</div>
+        </div>
+        <div class="form-group">
+          <label for="phoneInput">Phone Number (for SMS)</label>
+          <input type="tel" id="phoneInput" placeholder="+1 555 000 0000" />
+          <div class="form-hint">Include country code (e.g. +972, +1)</div>
+        </div>
+        <div class="form-group full">
+          <button class="btn-primary" id="addBtn" onclick="addWatch()">
+            <span id="addBtnText">🔔 Start Monitoring</span>
+          </button>
+        </div>
+      </div>
+      <div class="error-msg" id="formError"></div>
+    </div>
+
+    <!-- Watches list -->
+    <div>
+      <div class="watches-header">
+        <div class="watches-title">Active Monitors <span class="watch-count" id="watchCount">0</span></div>
+      </div>
+      <div id="watchesList">
+        <div class="empty-state">
+          <span class="emoji">🛫</span>
+          <p>No flights being monitored yet.<br>Add your first flight URL above.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    let watches = [];
+    let nextCheckAt = null;
+    let isChecking = false;
+    let countdownTimer = null;
+    let pollTimer = null;
+    let hasWatches = false;
+
+    // Format time as HH:MM:SS
+    function fmtTime(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      return d.toLocaleTimeString();
+    }
+
+    // Format date + time
+    function fmtDateTime(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+    }
+
+    // Parse route/date from Air Haifa URL
+    function parseUrl(url) {
+      try {
+        const match = url.match(/flight-results\/([A-Z]{3}-[A-Z]{3})\/(\d{4}-\d{2}-\d{2})\/[^\/]+\/(\d+)/);
+        if (match) return `${match[1]} · ${match[2]} · ${match[3]} pax`;
+      } catch (e) {}
+      return url.substring(0, 60) + (url.length > 60 ? '…' : '');
+    }
+
+    function showToast(msg, type = 'success') {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = `show ${type === 'error' ? 'error-toast' : 'success'}`;
+      setTimeout(() => { t.className = t.className.replace('show', ''); }, 3500);
+    }
+
+    async function addWatch() {
+      const url = document.getElementById('urlInput').value.trim();
+      const email = document.getElementById('emailInput').value.trim();
+      const phone = document.getElementById('phoneInput').value.trim();
+      const vtext = document.getElementById('vtextInput').value.trim();
+      const errEl = document.getElementById('formError');
+      const btn = document.getElementById('addBtn');
+      const btnText = document.getElementById('addBtnText');
+
+      errEl.classList.remove('show');
+
+      if (!url) { showError('Please enter an Air Haifa flight URL'); return; }
+      if (!url.includes('airhaifa.com')) { showError('URL must be from airhaifa.com'); return; }
+      if (!email && !phone && !vtext) { showError('Please enter at least an email address, Verizon number, or Twilio phone number'); return; }
+
+      btn.disabled = true;
+      btnText.innerHTML = '<div class="spinner"></div> Adding...';
+
+      try {
+        const res = await fetch('/api/watches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, email, phone, vtext }),
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          showError(data.error || 'Failed to add watch');
+          return;
+        }
+
+        document.getElementById('urlInput').value = '';
+        document.getElementById('emailInput').value = '';
+        document.getElementById('phoneInput').value = '';
+        document.getElementById('vtextInput').value = '';
+        showToast('✅ Now monitoring! First check in progress...');
+        await loadStatus();
+
+      } catch (e) {
+        showError('Network error: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btnText.textContent = '🔔 Start Monitoring';
+      }
+    }
+
+    function showError(msg) {
+      const el = document.getElementById('formError');
+      el.textContent = '⚠️ ' + msg;
+      el.classList.add('show');
+    }
+
+    async function removeWatch(id) {
+      try {
+        await fetch(`/api/watches/${id}`, { method: 'DELETE' });
+        showToast('🗑️ Removed from monitoring', 'info');
+        await loadStatus();
+      } catch (e) {
+        showToast('Failed to remove: ' + e.message, 'error');
+      }
+    }
+
+    async function checkNow() {
+      try {
+        await fetch('/api/check-now', { method: 'POST' });
+        showToast('🔄 Manual check triggered!');
+      } catch (e) {}
+    }
+
+    function renderWatches(data) {
+      const list = document.getElementById('watchesList');
+      watches = data.watches;
+      isChecking = data.isChecking;
+      nextCheckAt = data.nextCheckAt ? new Date(data.nextCheckAt) : null;
+      hasWatches = watches.length > 0;
+
+      document.getElementById('watchCount').textContent = watches.length;
+
+      // Update status bar
+      const pulse = document.getElementById('pulseIndicator');
+      const statusText = document.getElementById('statusText');
+      const countdownEl = document.getElementById('countdown');
+      const btnCheck = document.getElementById('btnCheckNow');
+
+      if (!hasWatches) {
+        pulse.className = 'pulse idle';
+        statusText.innerHTML = '<strong>Ready</strong> — Add a flight URL to start monitoring';
+        countdownEl.style.display = 'none';
+        btnCheck.style.display = 'none';
+      } else if (isChecking) {
+        pulse.className = 'pulse checking';
+        statusText.innerHTML = '🔄 <strong>Checking flights...</strong> Please wait';
+        countdownEl.style.display = 'none';
+        btnCheck.style.display = 'none';
+      } else {
+        pulse.className = 'pulse';
+        const available = watches.filter(w => w.available).length;
+        statusText.innerHTML = `Monitoring <strong>${watches.length}</strong> flight(s) · <strong style="color:var(--green2)">${available} available</strong>`;
+        countdownEl.style.display = '';
+        btnCheck.style.display = '';
+      }
+
+      // Hide setup guide if not relevant
+      document.getElementById('setupGuide').style.display = 'block'; // always show for now
+
+      if (watches.length === 0) {
+        list.innerHTML = `<div class="empty-state"><span class="emoji">🛫</span><p>No flights being monitored yet.<br>Add your first flight URL above.</p></div>`;
+        return;
+      }
+
+      list.innerHTML = watches.map(w => {
+        const label = parseUrl(w.url);
+        const statusClass = w.status || 'pending';
+        const badges = {
+          available: '✅ Available',
+          not_available: '❌ Not Available',
+          checking: '⟳ Checking...',
+          pending: '⏳ Pending',
+          error: '⚠️ Error',
+        };
+        const badgeText = badges[statusClass] || statusClass;
+
+        let detailsHtml = '';
+
+        if (w.available && w.flights && w.flights.length > 0) {
+          const flightRows = w.flights.map(f => `
+            <div class="flight-row">
+              <span class="flight-num">${f.flightNum || ''}</span>
+              <span class="flight-route">${f.from} → ${f.to}</span>
+              ${f.departure ? `<span style="color:var(--text3);font-size:12px">${f.departure.substring(0, 16)}</span>` : ''}
+              <span class="flight-seats">🪑 ${f.freeSeats} seat${f.freeSeats !== 1 ? 's' : ''}</span>
+              ${f.price ? `<span class="flight-price">${f.price} ${f.currency || ''}</span>` : ''}
+            </div>`).join('');
+          detailsHtml = `<div class="availability-details"><h4>✈️ Available Flights</h4>${flightRows}</div>`;
+        }
+
+        if (w.notified) {
+          detailsHtml += `<div class="notified-banner">🔔 Notification sent at ${fmtTime(w.notifiedAt)}</div>`;
+        }
+
+        if (w.error) {
+          detailsHtml += `<div class="error-detail">⚠️ ${w.error}</div>`;
+        }
+
+        return `
+        <div class="watch-card ${statusClass}" id="watch-${w.id}">
+          <div class="watch-header">
+            <div class="badge ${statusClass}">${badgeText}</div>
+            <div class="watch-info">
+              <a class="watch-url" href="${w.url}" target="_blank">${w.url}</a>
+              <div class="watch-meta">
+                <div class="watch-meta-item">🏷️ ${label}</div>
+                ${w.email ? `<div class="watch-meta-item">📧 ${w.email}</div>` : ''}
+                ${w.phone ? `<div class="watch-meta-item">📱 ${w.phone}</div>` : ''}
+                ${w.vtext ? `<div class="watch-meta-item">📱 Verizon: ${w.vtext}</div>` : ''}
+                <div class="watch-meta-item">🕐 ${w.lastChecked ? 'Checked ' + fmtTime(w.lastChecked) : 'Not checked yet'}</div>
+                ${w.freeSeats !== null ? `<div class="watch-meta-item" style="color:${w.freeSeats > 0 ? 'var(--green2)' : 'var(--text3)'}">💺 ${w.freeSeats} seat(s)</div>` : ''}
+              </div>
+            </div>
+            <div class="watch-actions">
+              <button class="btn-icon danger" onclick="removeWatch('${w.id}')" title="Remove">🗑️</button>
+            </div>
+          </div>
+          ${detailsHtml}
+        </div>`;
+      }).join('');
+    }
+
+    async function loadStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        renderWatches(data);
+      } catch (e) {
+        console.error('Status fetch failed:', e);
+      }
+    }
+
+    // Countdown timer
+    function updateCountdown() {
+      if (!nextCheckAt || !hasWatches) return;
+      const remaining = Math.max(0, Math.ceil((nextCheckAt - Date.now()) / 1000));
+      document.getElementById('countdownVal').textContent = remaining;
+    }
+
+    // Poll for status updates
+    async function startPolling() {
+      await loadStatus();
+      updateCountdown();
+      if (countdownTimer) clearInterval(countdownTimer);
+      if (pollTimer) clearInterval(pollTimer);
+      countdownTimer = setInterval(updateCountdown, 1000);
+      // Poll every 2.5 seconds for responsive UI
+      pollTimer = setInterval(async () => {
+        await loadStatus();
+      }, 2500);
+    }
+
+    // Enter to submit form
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (document.getElementById('urlInput') === document.activeElement ||
+          document.getElementById('emailInput') === document.activeElement ||
+          document.getElementById('phoneInput') === document.activeElement)) {
+        addWatch();
+      }
+    });
+
+    startPolling();
+  </script>
+</body>
+</html>

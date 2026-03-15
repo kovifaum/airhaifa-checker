@@ -159,6 +159,10 @@ async function checkFlightAvailability(url) {
 
 // ─── Notifications ──────────────────────────────────────────────────────────
 async function sendEmail(toString, watch, result) {
+  if (process.env.DISABLE_NOTIFICATIONS === 'true') {
+    console.log('[Email] Notifications disabled via DISABLE_NOTIFICATIONS');
+    return;
+  }
   if (!process.env.GMAIL_USER || !process.env.GMAIL_PASS) {
     console.log('[Email] Skipping – no Gmail credentials configured');
     return;
@@ -224,6 +228,10 @@ async function sendEmail(toString, watch, result) {
 }
 
 async function sendShortText(toString, watch, result) {
+  if (process.env.DISABLE_NOTIFICATIONS === 'true') {
+    console.log('[Email-to-SMS] Notifications disabled via DISABLE_NOTIFICATIONS');
+    return;
+  }
   if (!process.env.GMAIL_USER || !process.env.GMAIL_PASS) return;
 
   const transporter = nodemailer.createTransport({
@@ -252,6 +260,10 @@ async function sendShortText(toString, watch, result) {
 }
 
 async function sendSMS(to, watch, result) {
+  if (process.env.DISABLE_NOTIFICATIONS === 'true') {
+    console.log('[SMS] Notifications disabled via DISABLE_NOTIFICATIONS');
+    return;
+  }
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) {
     console.log('[SMS] Skipping – no Twilio credentials configured');
     return;

@@ -159,8 +159,8 @@ async function checkFlightAvailability(url) {
 
 // ─── Notifications ──────────────────────────────────────────────────────────
 async function sendEmail(toString, watch, result) {
-  if (process.env.DISABLE_NOTIFICATIONS === 'true') {
-    console.log('[Email] Notifications disabled via DISABLE_NOTIFICATIONS');
+  if (process.env.ENABLE_NOTIFICATIONS !== 'true') {
+    console.log('[Email] Notifications disabled (ENABLE_NOTIFICATIONS is not true)');
     return;
   }
   if (!process.env.GMAIL_USER || !process.env.GMAIL_PASS) {
@@ -228,8 +228,8 @@ async function sendEmail(toString, watch, result) {
 }
 
 async function sendShortText(toString, watch, result) {
-  if (process.env.DISABLE_NOTIFICATIONS === 'true') {
-    console.log('[Email-to-SMS] Notifications disabled via DISABLE_NOTIFICATIONS');
+  if (process.env.ENABLE_NOTIFICATIONS !== 'true') {
+    console.log('[Email-to-SMS] Notifications disabled (ENABLE_NOTIFICATIONS is not true)');
     return;
   }
   if (!process.env.GMAIL_USER || !process.env.GMAIL_PASS) return;
@@ -260,8 +260,8 @@ async function sendShortText(toString, watch, result) {
 }
 
 async function sendSMS(to, watch, result) {
-  if (process.env.DISABLE_NOTIFICATIONS === 'true') {
-    console.log('[SMS] Notifications disabled via DISABLE_NOTIFICATIONS');
+  if (process.env.ENABLE_NOTIFICATIONS !== 'true') {
+    console.log('[SMS] Notifications disabled (ENABLE_NOTIFICATIONS is not true)');
     return;
   }
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) {

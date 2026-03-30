@@ -3,6 +3,92 @@ const express = require('express');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const nodemailer = require('nodemailer');
+const crypto = require('crypto');
+
+// Auth & encryption config
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
+if (!process.env.JWT_SECRET) console.log('[Auth] WARNING: No JWT_SECRET set — tokens will be invalidated on restart. Set JWT_SECRET env var for persistence.');
+if (!process.env.ENCRYPTION_KEY) console.log('[Auth] WARNING: No ENCRYPTION_KEY set — encrypted data will be unreadable after restart. Set ENCRYPTION_KEY env var for persistence.');
+
+// Simple bcrypt-like hashing using crypto (no extra dependency)
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password, stored) {
+  const [salt, hash] = stored.split(':');
+  const testHash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return hash === testHash;
+}
+
+// AES-256-GCM encryption for sensitive fields
+function encrypt(text) {
+  if (!text) return null;
+  const key = Buffer.from(ENCRYPTION_KEY.substring(0, 64), 'hex');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const tag = cipher.getAuthTag().toString('hex');
+  return `${iv.toString('hex')}:${tag}:${encrypted}`;
+}
+
+function decrypt(encrypted) {
+  if (!encrypted) return null;
+  try {
+    const [ivHex, tagHex, data] = encrypted.split(':');
+    const key = Buffer.from(ENCRYPTION_KEY.substring(0, 64), 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+    let decrypted = decipher.update(data, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (e) {
+    console.error('[Decrypt] Failed:', e.message);
+    return null;
+  }
+}
+
+// JWT-like token (simple, no dependency)
+function createToken(userId) {
+  const payload = JSON.stringify({ userId, exp: Date.now() + 7 * 24 * 60 * 60 * 1000 }); // 7 days
+  const hmac = crypto.createHmac('sha256', JWT_SECRET).update(payload).digest('hex');
+  return Buffer.from(payload).toString('base64url') + '.' + hmac;
+}
+
+function verifyToken(token) {
+  try {
+    const [payloadB64, hmac] = token.split('.');
+    const payload = Buffer.from(payloadB64, 'base64url').toString();
+    const expected = crypto.createHmac('sha256', JWT_SECRET).update(payload).digest('hex');
+    if (hmac !== expected) return null;
+    const data = JSON.parse(payload);
+    if (data.exp < Date.now()) return null;
+    return data;
+  } catch (e) { return null; }
+}
+
+// User store
+const users = {};
+
+// Auth middleware
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  const token = authHeader.substring(7);
+  const data = verifyToken(token);
+  if (!data || !users[data.userId]) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+  req.userId = data.userId;
+  req.user = users[data.userId];
+  next();
+}
 
 const app = express();
 app.use(express.json());
@@ -591,11 +677,11 @@ async function attemptAutoBook(watch, flightResult) {
       lastName: profile.lastName,
       email: profile.email,
       phone: profile.phone,
-      passport: profile.passport,
+      passport: decrypt(profile.passport),
       dob: profile.dob,
-      cardNumber: profile.cardNumber,
-      cardExp: profile.cardExp,
-      cardCvv: profile.cardCvv,
+      cardNumber: decrypt(profile.cardNumber),
+      cardExp: decrypt(profile.cardExp),
+      cardCvv: decrypt(profile.cardCvv),
     };
 
     for (const [field, value] of Object.entries(formFields)) {
@@ -913,11 +999,11 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
       lastName: profile.lastName,
       email: profile.email,
       phone: profile.phone,
-      passport: profile.passport,
+      passport: decrypt(profile.passport),
       dob: profile.dob,
-      cardNumber: profile.cardNumber,
-      cardExp: profile.cardExp,
-      cardCvv: profile.cardCvv,
+      cardNumber: decrypt(profile.cardNumber),
+      cardExp: decrypt(profile.cardExp),
+      cardCvv: decrypt(profile.cardCvv),
     };
 
     let filledCount = 0;
@@ -1270,10 +1356,42 @@ function startChecker() {
 //  API Routes
 // ═══════════════════════════════════════════════════════════
 
+// ─── Auth Routes ─────────────────────────────────────────
+app.post('/api/signup', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+  if (username.length < 3) return res.status(400).json({ error: 'Username must be at least 3 characters' });
+  if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+  // Check if username taken
+  const existing = Object.values(users).find(u => u.username.toLowerCase() === username.toLowerCase());
+  if (existing) return res.status(400).json({ error: 'Username already taken' });
+
+  const id = uuidv4();
+  users[id] = { id, username, passwordHash: hashPassword(password), createdAt: new Date().toISOString() };
+  const token = createToken(id);
+  console.log(`[Auth] New user registered: ${username}`);
+  res.json({ success: true, token, username });
+});
+
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+
+  const user = Object.values(users).find(u => u.username.toLowerCase() === username.toLowerCase());
+  if (!user || !verifyPassword(password, user.passwordHash)) {
+    return res.status(401).json({ error: 'Invalid username or password' });
+  }
+
+  const token = createToken(user.id);
+  console.log(`[Auth] User logged in: ${username}`);
+  res.json({ success: true, token, username: user.username });
+});
+
 // Status
-app.get('/api/status', (req, res) => {
+app.get('/api/status', authMiddleware, (req, res) => {
   res.json({
-    watches: Object.values(watches).map(w => ({
+    watches: Object.values(watches).filter(w => w.userId === req.userId).map(w => ({
       id: w.id,
       airline: w.airline,
       url: w.url,
@@ -1301,17 +1419,17 @@ app.get('/api/status', (req, res) => {
     nextCheckAt: nextCheckAt ? nextCheckAt.toISOString() : null,
     isChecking,
     checkIntervalSeconds: CHECK_INTERVAL_MS / 1000,
-    profiles: Object.keys(userProfiles).map(id => ({
-      id,
-      firstName: userProfiles[id].firstName,
-      lastName: userProfiles[id].lastName,
-      email: userProfiles[id].email,
+    profiles: Object.values(userProfiles).filter(p => p.userId === req.userId).map(p => ({
+      id: p.id,
+      firstName: p.firstName,
+      lastName: p.lastName,
+      email: p.email,
     })),
   });
 });
 
 // Add watch
-app.post('/api/watches', (req, res) => {
+app.post('/api/watches', authMiddleware, (req, res) => {
   const { airline, url, origin, destination, date, passengers, email, vtext, maxPrice, autoBook, profileId, cabinClass } = req.body;
 
   if (airline === 'airhaifa' && !url && (!origin || !destination || !date)) return res.status(400).json({ error: 'Either a URL or origin/destination/date is required for Air Haifa' });
@@ -1321,6 +1439,7 @@ app.post('/api/watches', (req, res) => {
   const id = uuidv4();
   watches[id] = {
     id,
+    userId: req.userId,
     airline: airline || 'airhaifa',
     url: url || null,
     origin: origin || null,
@@ -1353,39 +1472,43 @@ app.post('/api/watches', (req, res) => {
 });
 
 // Remove watch
-app.delete('/api/watches/:id', (req, res) => {
+app.delete('/api/watches/:id', authMiddleware, (req, res) => {
   const { id } = req.params;
   if (!watches[id]) return res.status(404).json({ error: 'Watch not found' });
+  if (watches[id].userId !== req.userId) return res.status(403).json({ error: 'Not your watch' });
   delete watches[id];
   res.json({ success: true });
 });
 
 // Manual check
-app.post('/api/check-now', async (req, res) => {
+app.post('/api/check-now', authMiddleware, async (req, res) => {
   if (isChecking) return res.json({ message: 'Check already in progress' });
   res.json({ message: 'Manual check triggered' });
   runChecks();
 });
 
 // ─── User profiles (privacy-safe: in-memory only) ────────
-app.post('/api/profiles', (req, res) => {
+app.post('/api/profiles', authMiddleware, (req, res) => {
   const { firstName, lastName, email, phone, passport, dob, nationality, cardNumber, cardExp, cardCvv } = req.body;
   if (!firstName || !lastName) return res.status(400).json({ error: 'First and last name required' });
 
   const id = uuidv4();
   userProfiles[id] = {
-    id, firstName, lastName, email, phone, passport, dob, nationality,
-    cardNumber: cardNumber || null,
-    cardExp: cardExp || null,
-    cardCvv: cardCvv || null,
+    id, firstName, lastName, email, phone,
+    userId: req.userId,
+    passport: encrypt(passport),
+    dob, nationality,
+    cardNumber: encrypt(cardNumber || null),
+    cardExp: encrypt(cardExp || null),
+    cardCvv: encrypt(cardCvv || null),
     createdAt: new Date().toISOString(),
   };
   res.json({ success: true, id, name: `${firstName} ${lastName}` });
 });
 
-app.get('/api/profiles', (req, res) => {
+app.get('/api/profiles', authMiddleware, (req, res) => {
   res.json({
-    profiles: Object.values(userProfiles).map(p => ({
+    profiles: Object.values(userProfiles).filter(p => p.userId === req.userId).map(p => ({
       id: p.id,
       firstName: p.firstName,
       lastName: p.lastName,
@@ -1394,16 +1517,17 @@ app.get('/api/profiles', (req, res) => {
   });
 });
 
-app.delete('/api/profiles/:id', (req, res) => {
+app.delete('/api/profiles/:id', authMiddleware, (req, res) => {
   const { id } = req.params;
   if (!userProfiles[id]) return res.status(404).json({ error: 'Profile not found' });
+  if (userProfiles[id].userId !== req.userId) return res.status(403).json({ error: 'Not your profile' });
   delete userProfiles[id];
   res.json({ success: true });
 });
 
 // ─── Test Mode ────────────────────────────────────────────
 // Simulates finding a flight to test the full notification + booking pipeline
-app.post('/api/test', async (req, res) => {
+app.post('/api/test', authMiddleware, async (req, res) => {
   const { email, vtext, autoBook, profileId, testType } = req.body;
   if (!email && !vtext) return res.status(400).json({ error: 'Email or vtext required' });
 
@@ -1496,7 +1620,7 @@ app.post('/api/test', async (req, res) => {
 });
 
 // ─── Live scrape test (actually checks a real URL) ────────
-app.post('/api/test-scrape', async (req, res) => {
+app.post('/api/test-scrape', authMiddleware, async (req, res) => {
   const { airline, url, origin, destination, date } = req.body;
   console.log(`\n[TEST SCRAPE] Testing real scrape...`);
 

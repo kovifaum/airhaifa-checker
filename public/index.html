@@ -256,6 +256,34 @@
       .tabs { flex-wrap: wrap; }
     }
 
+    /* Auth screen */
+    .auth-overlay {
+      position: fixed; inset: 0; z-index: 100;
+      background: var(--bg);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .auth-overlay.hidden { display: none; }
+    .auth-box {
+      background: var(--surface); border: 1px solid var(--border);
+      backdrop-filter: blur(20px); border-radius: var(--radius);
+      padding: 36px; width: 100%; max-width: 400px; margin: 20px;
+    }
+    .auth-box h2 {
+      font-size: 22px; font-weight: 700; text-align: center; margin-bottom: 6px;
+      background: linear-gradient(135deg, #fff, var(--blue2));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .auth-box .auth-subtitle { text-align: center; color: var(--text3); font-size: 13px; margin-bottom: 24px; }
+    .auth-box .form-group { margin-bottom: 14px; }
+    .auth-toggle { text-align: center; margin-top: 16px; font-size: 13px; color: var(--text3); }
+    .auth-toggle a { color: var(--blue2); cursor: pointer; text-decoration: underline; }
+    .auth-error { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: var(--radius-sm); color: #fca5a5; font-size: 13px; padding: 10px 14px; margin-bottom: 14px; display: none; }
+    .auth-error.show { display: block; }
+    .user-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .user-bar .username { font-size: 13px; color: var(--text2); }
+    .user-bar .btn-logout { font-size: 12px; color: var(--text3); background: none; border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; margin-left: auto; }
+    .user-bar .btn-logout:hover { color: var(--red); border-color: rgba(239,68,68,0.3); }
+
     /* Spinner */
     .spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
@@ -277,12 +305,43 @@
   </style>
 </head>
 <body>
+  <!-- Auth Screen -->
+  <div class="auth-overlay" id="authOverlay">
+    <div class="auth-box">
+      <div style="text-align:center;font-size:36px;margin-bottom:12px;">✈️</div>
+      <h2 id="authTitle">Welcome to SkyWatch</h2>
+      <p class="auth-subtitle" id="authSubtitle">Sign in to manage your flight monitors</p>
+      <div class="auth-error" id="authError"></div>
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="authUsername" placeholder="your username" autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="authPassword" placeholder="your password" autocomplete="current-password" />
+      </div>
+      <button class="btn-primary" id="authBtn" onclick="doAuth()">
+        <span id="authBtnText">Sign In</span>
+      </button>
+      <div class="auth-toggle">
+        <span id="authToggleText">Don't have an account?</span>
+        <a id="authToggleLink" onclick="toggleAuthMode()">Sign Up</a>
+      </div>
+    </div>
+  </div>
+
   <div class="wrapper">
     <!-- Header -->
     <div class="header">
       <div class="header-icon">✈️</div>
       <h1>SkyWatch Flight Tracker</h1>
       <p>Monitor flights across airlines. Get email &amp; SMS alerts the moment seats open up — or auto-book instantly.</p>
+    </div>
+
+    <!-- User bar -->
+    <div class="user-bar" id="userBar" style="display:none">
+      <span class="username">Signed in as <strong id="displayUsername"></strong></span>
+      <button class="btn-logout" onclick="logout()">Sign Out</button>
     </div>
 
     <!-- Status bar -->
@@ -476,7 +535,7 @@
     <!-- TAB: User Profiles -->
     <div class="tab-content" id="tab-profiles">
       <div class="privacy-notice">
-        <strong>Privacy-Safe:</strong> Your personal info is stored in server memory only and is <strong>never saved to disk</strong>. Data is cleared when the server restarts. This info is only used for auto-booking if you enable it.
+        <strong>Privacy-Safe:</strong> Your personal info is stored in server memory only and is <strong>never saved to disk</strong>. Sensitive data (passport, credit card) is <strong>encrypted with AES-256</strong>. Data is cleared when the server restarts. Only you can see your data — other users cannot access it.
       </div>
 
       <div class="card">
@@ -561,6 +620,104 @@
     let countdownTimer = null;
     let pollTimer = null;
 
+    // ─── Auth state ─────────────────────────────
+    let authToken = localStorage.getItem('skywatch_token');
+    let authUsername = localStorage.getItem('skywatch_username');
+    let authMode = 'login'; // 'login' or 'signup'
+
+    function getAuthHeaders() {
+      return {
+        'Content-Type': 'application/json',
+        'Authorization': authToken ? `Bearer ${authToken}` : '',
+      };
+    }
+
+    function authFetch(url, opts = {}) {
+      opts.headers = { ...getAuthHeaders(), ...opts.headers };
+      return fetch(url, opts).then(res => {
+        if (res.status === 401) {
+          // Token expired or invalid
+          logout();
+          throw new Error('Session expired — please sign in again');
+        }
+        return res;
+      });
+    }
+
+    function showAuthScreen() {
+      document.getElementById('authOverlay').classList.remove('hidden');
+      document.querySelector('.wrapper').style.display = 'none';
+      document.getElementById('userBar').style.display = 'none';
+    }
+
+    function hideAuthScreen() {
+      document.getElementById('authOverlay').classList.add('hidden');
+      document.querySelector('.wrapper').style.display = '';
+      document.getElementById('userBar').style.display = 'flex';
+      document.getElementById('displayUsername').textContent = authUsername;
+    }
+
+    function toggleAuthMode() {
+      authMode = authMode === 'login' ? 'signup' : 'login';
+      document.getElementById('authTitle').textContent = authMode === 'login' ? 'Welcome to SkyWatch' : 'Create Account';
+      document.getElementById('authSubtitle').textContent = authMode === 'login' ? 'Sign in to manage your flight monitors' : 'Create an account to get started';
+      document.getElementById('authBtnText').textContent = authMode === 'login' ? 'Sign In' : 'Sign Up';
+      document.getElementById('authToggleText').textContent = authMode === 'login' ? "Don't have an account?" : 'Already have an account?';
+      document.getElementById('authToggleLink').textContent = authMode === 'login' ? 'Sign Up' : 'Sign In';
+      document.getElementById('authError').classList.remove('show');
+    }
+
+    async function doAuth() {
+      const username = document.getElementById('authUsername').value.trim();
+      const password = document.getElementById('authPassword').value;
+      const errEl = document.getElementById('authError');
+      errEl.classList.remove('show');
+
+      if (!username || !password) { errEl.textContent = 'Please enter username and password'; errEl.classList.add('show'); return; }
+
+      const btn = document.getElementById('authBtn');
+      btn.disabled = true;
+      document.getElementById('authBtnText').innerHTML = '<div class="spinner"></div>';
+
+      try {
+        const endpoint = authMode === 'login' ? '/api/login' : '/api/signup';
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) { errEl.textContent = data.error || 'Failed'; errEl.classList.add('show'); return; }
+
+        authToken = data.token;
+        authUsername = data.username;
+        localStorage.setItem('skywatch_token', authToken);
+        localStorage.setItem('skywatch_username', authUsername);
+        hideAuthScreen();
+        startPolling();
+      } catch (e) {
+        errEl.textContent = 'Network error: ' + e.message;
+        errEl.classList.add('show');
+      } finally {
+        btn.disabled = false;
+        document.getElementById('authBtnText').textContent = authMode === 'login' ? 'Sign In' : 'Sign Up';
+      }
+    }
+
+    function logout() {
+      authToken = null;
+      authUsername = null;
+      localStorage.removeItem('skywatch_token');
+      localStorage.removeItem('skywatch_username');
+      if (pollTimer) clearInterval(pollTimer);
+      if (countdownTimer) clearInterval(countdownTimer);
+      showAuthScreen();
+    }
+
+    // Enter key on auth form
+    document.getElementById('authPassword').addEventListener('keydown', e => { if (e.key === 'Enter') doAuth(); });
+    document.getElementById('authUsername').addEventListener('keydown', e => { if (e.key === 'Enter') doAuth(); });
+
     // ─── Tab switching ──────────────────────────
     function switchTab(name) {
       document.querySelectorAll('.tab').forEach((t, i) => {
@@ -573,11 +730,8 @@
     // ─── Airline form toggle ────────────────────
     function updateAirlineForm() {
       const airline = document.getElementById('airlineSelect').value;
-      // Route fields always visible for both airlines now
       document.getElementById('routeFields').classList.remove('hidden');
-      // URL override only for Air Haifa
       document.getElementById('airhaifaUrlField').classList.toggle('hidden', airline !== 'airhaifa');
-      // Update placeholder
       document.getElementById('destInput').placeholder = airline === 'airhaifa' ? 'ATH' : 'JFK';
     }
 
@@ -592,10 +746,7 @@
     function quickAdd(airline, origin, dest, date) {
       const email = document.getElementById('emailInput').value.trim();
       const vtext = document.getElementById('vtextInput').value.trim();
-      if (!email && !vtext) {
-        showToast('Please enter an email or Verizon number first', 'error');
-        return;
-      }
+      if (!email && !vtext) { showToast('Please enter an email or Verizon number first', 'error'); return; }
       addWatchDirect({ airline, origin, destination: dest, date, email, vtext });
     }
 
@@ -630,7 +781,6 @@
         cabinClass: document.getElementById('cabinClassSelect').value || 'economy',
       };
 
-      // Both airlines use route + date
       payload.origin = document.getElementById('originInput').value.trim().toUpperCase();
       payload.destination = document.getElementById('destInput').value.trim().toUpperCase();
       payload.date = document.getElementById('dateInput').value;
@@ -661,9 +811,8 @@
       btnText.innerHTML = '<div class="spinner"></div> Adding...';
 
       try {
-        const res = await fetch('/api/watches', {
+        const res = await authFetch('/api/watches', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
         const data = await res.json();
@@ -681,9 +830,8 @@
 
     async function addWatchDirect(payload) {
       try {
-        const res = await fetch('/api/watches', {
+        const res = await authFetch('/api/watches', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
         const data = await res.json();
@@ -699,7 +847,7 @@
     // ─── Remove watch ───────────────────────────
     async function removeWatch(id) {
       try {
-        await fetch(`/api/watches/${id}`, { method: 'DELETE' });
+        await authFetch(`/api/watches/${id}`, { method: 'DELETE' });
         showToast('Removed');
         await loadStatus();
       } catch (e) {}
@@ -708,7 +856,7 @@
     // ─── Check now ──────────────────────────────
     async function checkNow() {
       try {
-        await fetch('/api/check-now', { method: 'POST' });
+        await authFetch('/api/check-now', { method: 'POST' });
         showToast('Manual check triggered');
       } catch (e) {}
     }
@@ -737,15 +885,13 @@
       }
 
       try {
-        const res = await fetch('/api/profiles', {
+        const res = await authFetch('/api/profiles', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
         const data = await res.json();
         if (!res.ok) { showError('profError', data.error); return; }
         showToast(`Profile saved: ${payload.firstName} ${payload.lastName}`);
-        // Clear form
         ['profFirstName','profLastName','profEmail','profPhone','profPassport','profDob','profNationality','profCardNumber','profCardExp','profCardCvv'].forEach(id => document.getElementById(id).value = '');
         await loadStatus();
       } catch (e) {
@@ -755,7 +901,7 @@
 
     async function removeProfile(id) {
       try {
-        await fetch(`/api/profiles/${id}`, { method: 'DELETE' });
+        await authFetch(`/api/profiles/${id}`, { method: 'DELETE' });
         showToast('Profile removed');
         await loadStatus();
       } catch (e) {}
@@ -765,7 +911,6 @@
       const list = document.getElementById('profilesList');
       const select = document.getElementById('profileSelect');
 
-      // Update select dropdown
       const currentVal = select.value;
       select.innerHTML = '<option value="">Notify only (no auto-book)</option>';
       profiles.forEach(p => {
@@ -809,7 +954,6 @@
       document.getElementById('watchCount').textContent = watches.length;
       document.getElementById('watchCountTab').textContent = watches.length > 0 ? `(${watches.length})` : '';
 
-      // Status bar
       const pulse = document.getElementById('pulseIndicator');
       const statusText = document.getElementById('statusText');
       const countdownEl = document.getElementById('countdown');
@@ -833,10 +977,8 @@
         btnCheck.style.display = '';
       }
 
-      // Render profile list
       renderProfiles();
 
-      // Render watch cards
       const list = document.getElementById('watchesList');
       if (watches.length === 0) {
         list.innerHTML = '<div class="empty-state"><span class="emoji">🛫</span><p>No flights being monitored yet.</p></div>';
@@ -909,7 +1051,7 @@
     // ─── Polling & countdown ────────────────────
     async function loadStatus() {
       try {
-        const res = await fetch('/api/status');
+        const res = await authFetch('/api/status');
         const data = await res.json();
         renderWatches(data);
       } catch (e) {
@@ -942,9 +1084,8 @@
           const email = document.getElementById('testEmail').value.trim();
           const vtext = document.getElementById('testVtext').value.trim();
           if (!email && !vtext) { resultDiv.innerHTML = '⚠️ Enter an email or vtext number above'; return; }
-          const res = await fetch('/api/test', {
+          const res = await authFetch('/api/test', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, vtext }),
           });
           const data = await res.json();
@@ -960,9 +1101,8 @@
           }
         } else if (type === 'scrape' || type === 'scrape-elal') {
           const airline = type === 'scrape-elal' ? 'elal' : 'airhaifa';
-          const res = await fetch('/api/test-scrape', {
+          const res = await authFetch('/api/test-scrape', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               airline,
               origin: 'TLV',
@@ -1014,7 +1154,13 @@
     // Set default dates
     document.getElementById('dateInput').value = '2026-03-30';
 
-    startPolling();
+    // ─── Init: check auth ───────────────────────
+    if (authToken) {
+      hideAuthScreen();
+      startPolling();
+    } else {
+      showAuthScreen();
+    }
   </script>
 </body>
 </html>

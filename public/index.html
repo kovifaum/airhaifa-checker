@@ -854,8 +854,8 @@
                 <span class="flight-num">${f.airline || ''} ${f.flightNum || ''}</span>
                 <span class="flight-route">${f.from} → ${f.to}</span>
                 ${f.departure ? `<span style="color:var(--text3)">${String(f.departure).substring(0, 16)}</span>` : ''}
-                <span class="flight-seats">${f.freeSeats} seat(s)</span>
-                ${f.price ? `<span class="flight-price">$${f.price} ${f.currency || ''}</span>` : ''}
+                <span class="flight-seats">${f.freeSeats} seat(s)${f.stops ? ' · ' + f.stops : ''}</span>
+                ${f.price ? `<span class="flight-price">${String(f.price).startsWith('$') ? f.price : '$' + f.price} ${f.currency || ''}</span>` : ''}
               </div>`).join('') + `</div>`;
         }
         if (w.notified) {
@@ -966,11 +966,18 @@
             let html = r.available
               ? `<div style="color:var(--green2)">✅ FOUND! ${r.freeSeats} seat(s) available</div>`
               : `<div style="color:var(--amber)">❌ No seats found (${r.reason || 'unavailable'})</div>`;
-            html += `<div style="color:var(--text3);margin-top:4px">Scrape worked! The checker can read ${airline === 'elal' ? 'El Al' : 'Air Haifa'} data.</div>`;
+            html += `<div style="color:var(--text3);margin-top:4px">Scrape worked! ${airline === 'elal' ? '(via Google Flights)' : 'The checker can read Air Haifa data.'}</div>`;
             if (r.flights && r.flights.length > 0) {
-              html += '<div style="margin-top:8px">';
+              html += '<div style="margin-top:8px"><strong style="font-size:12px">El Al flights:</strong>';
               r.flights.forEach(f => {
-                html += `<div style="padding:4px 0;font-size:12px;">${f.flightNum || '?'} ${f.from}→${f.to} | ${f.freeSeats} seats | ${f.price ? '$'+f.price : 'no price'}</div>`;
+                html += `<div style="padding:4px 0;font-size:12px;">${f.flightNum || '?'} ${f.from}→${f.to} | ${f.departure || ''} - ${f.arrival || ''} | ${f.stops || ''} | ${f.price || 'no price'}</div>`;
+              });
+              html += '</div>';
+            }
+            if (r.allAirlines && r.allAirlines.length > 0) {
+              html += '<div style="margin-top:8px"><strong style="font-size:12px">All airlines on route:</strong>';
+              r.allAirlines.forEach(f => {
+                html += `<div style="padding:4px 0;font-size:12px;">${f.airline} | ${f.departure || ''} - ${f.arrival || ''} | ${f.stops || ''} | ${f.price || 'no price'}</div>`;
               });
               html += '</div>';
             }

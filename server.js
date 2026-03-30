@@ -171,135 +171,114 @@ async function checkAirHaifa(url) {
   }
 }
 
-// ─── El Al checker ────────────────────────────────────────
+// ─── El Al checker (via Google Flights — El Al blocks bots directly) ─────
 async function checkElAl(origin, destination, date, passengers = 1) {
   const br = await getBrowser();
   const page = await br.newPage();
   await page.setViewport({ width: 1366, height: 768 });
 
-  let flightApiData = null;
-
-  // Intercept El Al's API responses
-  page.on('response', async (response) => {
-    const resUrl = response.url();
-    // El Al uses various API endpoints - try to catch flight search results
-    if (resUrl.includes('/api/') && (resUrl.includes('flight') || resUrl.includes('search') || resUrl.includes('availability'))) {
-      try {
-        const ct = response.headers()['content-type'] || '';
-        if (ct.includes('json')) {
-          const text = await response.text();
-          const data = JSON.parse(text);
-          if (data && (data.flights || data.results || data.outbound || data.Flights || data.FlightResults)) {
-            flightApiData = data;
-          }
-        }
-      } catch (e) {}
-    }
-  });
-
-  const searchUrl = `https://booking.elal.com/booking/flights?market=US&lang=en&isOneWay=true&origin=${origin}&destination=${destination}&dep=${date}&adult=${passengers}`;
+  // Google Flights query-based URL (easy to construct, handles one-way)
+  const gfQuery = `Flights from ${origin} to ${destination} on ${date} one way ${passengers} passenger`;
+  const searchUrl = `https://www.google.com/travel/flights?q=${encodeURIComponent(gfQuery)}&hl=en`;
+  // Direct El Al booking URL for user reference
+  const elAlBookingUrl = `https://www.elal.com/en/booking/flight-select/?isOneWay=true&origin=${origin}&destination=${destination}&dep=${date}&adult=${passengers}`;
 
   try {
-    console.log(`[ElAl] Navigating to: ${searchUrl}`);
+    console.log(`[ElAl] Using Google Flights: ${searchUrl}`);
     await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-    await new Promise(r => setTimeout(r, 8000));
+    // Wait for flight results to render (Google Flights is a SPA)
+    await new Promise(r => setTimeout(r, 6000));
 
-    // Try to extract data from the page DOM if API interception didn't work
-    let pageFlights = [];
-    try {
-      pageFlights = await page.evaluate(() => {
-        const results = [];
-        // Try to find flight cards on the page
-        const flightElements = document.querySelectorAll('[class*="flight"], [class*="Flight"], [data-flight], .search-result, .flight-card, .flight-row');
-        flightElements.forEach(el => {
-          const text = el.innerText || '';
-          // Extract price if visible
-          const priceMatch = text.match(/\$[\d,]+|\d+\s*(USD|ILS|EUR)/i);
-          const timeMatch = text.match(/\d{1,2}:\d{2}/g);
-          if (priceMatch || timeMatch) {
+    // Scrape flight cards from Google Flights
+    const pageFlights = await page.evaluate(() => {
+      const cards = document.querySelectorAll('li.pIav2d');
+      const results = [];
+      const seen = new Set();
+      for (const card of cards) {
+        const text = card.innerText || '';
+        const priceMatch = text.match(/\$[\d,]+/);
+        const airlineMatch = text.match(/(El\s*Al|Etihad|Turkish|Lufthansa|United|Delta|American|Swiss|LOT|Austrian|Arkia|Israir|British|Air France|KLM|Emirates|Qatar|Aegean|Ryanair|Wizz)/i);
+        const routeMatch = text.match(/([A-Z]{3})[–\-]([A-Z]{3})/);
+        const stopsMatch = text.match(/(Nonstop|\d+\s*stop)/i);
+        const durationMatch = text.match(/(\d+\s*hr\s*\d*\s*min?)/);
+        const timeMatch = text.match(/(\d{1,2}:\d{2}\s*[AP]M)/g);
+
+        if (priceMatch && airlineMatch) {
+          const key = airlineMatch[1] + '-' + priceMatch[0] + '-' + (timeMatch ? timeMatch[0] : '');
+          if (!seen.has(key)) {
+            seen.add(key);
             results.push({
-              text: text.substring(0, 300),
-              price: priceMatch ? priceMatch[0] : null,
-              times: timeMatch || [],
+              airline: airlineMatch[1],
+              price: priceMatch[0],
+              from: routeMatch ? routeMatch[1] : '',
+              to: routeMatch ? routeMatch[2] : '',
+              stops: stopsMatch ? stopsMatch[0] : '',
+              duration: durationMatch ? durationMatch[1] : '',
+              departure: timeMatch && timeMatch[0] ? timeMatch[0] : '',
+              arrival: timeMatch && timeMatch[1] ? timeMatch[1] : '',
             });
           }
-        });
-
-        // Also check for "no flights" messages
-        const bodyText = document.body.innerText;
-        if (bodyText.includes('No flights') || bodyText.includes('no results') || bodyText.includes('unavailable')) {
-          return [{ noFlights: true }];
         }
-
-        return results;
-      });
-    } catch (e) {}
+      }
+      // Check for "no flights" state
+      const bodyText = document.body.innerText;
+      if (bodyText.includes('No flights match') || bodyText.includes('Try different dates')) {
+        return [{ noFlights: true }];
+      }
+      return results;
+    });
 
     await page.close();
 
-    // Process API data if we got it
-    if (flightApiData) {
-      const flights = flightApiData.flights || flightApiData.results || flightApiData.Flights || flightApiData.FlightResults || [];
-      const flightDetails = [];
-      let totalSeats = 0;
-
-      const flightArray = Array.isArray(flights) ? flights : Object.values(flights);
-      for (const f of flightArray) {
-        const seats = f.seatsAvailable || f.seats || f.availability || 1;
-        totalSeats += seats;
-        flightDetails.push({
-          airline: 'El Al',
-          flightNum: f.flightNumber || f.flightNum || f.number || 'LY???',
-          from: origin,
-          to: destination,
-          departure: f.departureTime || f.departure || date,
-          arrival: f.arrivalTime || f.arrival || '',
-          className: f.cabin || f.class || 'Economy',
-          freeSeats: seats,
-          price: f.price || f.totalPrice || f.fare || null,
-          currency: 'USD',
-          bookingUrl: searchUrl,
-        });
-      }
-
-      return {
-        available: flightDetails.length > 0,
-        freeSeats: totalSeats,
-        flights: flightDetails,
-        reason: flightDetails.length > 0 ? 'seats_available' : 'no_flights',
-      };
+    if (pageFlights.length > 0 && pageFlights[0]?.noFlights) {
+      return { available: false, freeSeats: 0, flights: [], reason: 'no_flights' };
     }
 
-    // Fallback: process DOM-scraped data
-    if (pageFlights.length > 0 && !pageFlights[0]?.noFlights) {
-      const flightDetails = pageFlights.filter(f => f.price).map((f, i) => ({
-        airline: 'El Al',
-        flightNum: `LY${i + 1}`,
-        from: origin,
-        to: destination,
-        departure: f.times[0] || date,
-        arrival: f.times[1] || '',
-        className: 'Economy',
-        freeSeats: 1,
-        price: f.price,
-        currency: 'USD',
-        bookingUrl: searchUrl,
-        rawText: f.text,
-      }));
+    // Filter for El Al flights specifically
+    const elAlFlights = pageFlights.filter(f =>
+      f.airline && f.airline.toLowerCase().replace(/\s/g, '') === 'elal'
+    );
 
-      return {
-        available: flightDetails.length > 0,
-        freeSeats: flightDetails.length,
-        flights: flightDetails,
-        reason: flightDetails.length > 0 ? 'seats_available' : 'no_flights',
-      };
+    // Also keep all flights for reference
+    const allFlights = pageFlights;
+
+    const flightDetails = (elAlFlights.length > 0 ? elAlFlights : []).map((f, i) => ({
+      airline: 'El Al',
+      flightNum: `LY${i + 1}`,
+      from: f.from || origin,
+      to: f.to || destination,
+      departure: f.departure || date,
+      arrival: f.arrival || '',
+      className: 'Economy',
+      freeSeats: 1, // Google Flights doesn't show seat count
+      price: f.price,
+      currency: 'USD',
+      stops: f.stops,
+      duration: f.duration,
+      bookingUrl: elAlBookingUrl,
+    }));
+
+    // If no El Al flights but other airlines found, note that
+    let reason = 'no_flights';
+    if (flightDetails.length > 0) {
+      reason = 'seats_available';
+    } else if (allFlights.length > 0) {
+      reason = `No El Al flights found, but ${allFlights.length} other airline(s) available on this route`;
     }
 
     return {
-      available: false,
-      freeSeats: 0,
-      flights: [],
-      reason: 'Could not determine availability - page may need manual review',
+      available: flightDetails.length > 0,
+      freeSeats: flightDetails.length,
+      flights: flightDetails,
+      reason,
+      allAirlines: allFlights.map(f => ({
+        airline: f.airline,
+        price: f.price,
+        stops: f.stops,
+        departure: f.departure,
+        arrival: f.arrival,
+        duration: f.duration,
+      })),
     };
   } catch (e) {
     try { await page.close(); } catch (_) {}

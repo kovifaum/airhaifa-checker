@@ -1014,7 +1014,16 @@
           detailsHtml += `<div class="notified-banner">🔔 Notification sent at ${fmtTime(w.notifiedAt)}</div>`;
         }
         if (w.bookingResult) {
-          detailsHtml += `<div class="booking-banner">${w.bookingResult.booked ? '✅' : '⚠️'} ${w.bookingResult.reason}</div>`;
+          if (w.bookingResult.isLinkOnly && w.bookingResult.bookingLinks) {
+            const links = w.bookingResult.bookingLinks;
+            detailsHtml += `<div class="booking-banner" style="background:linear-gradient(135deg,#1e3a5f,#2d5a87);padding:12px;border-radius:8px;margin-top:8px;">
+              🔗 <strong>${w.bookingResult.reason}</strong><br>
+              <a href="${links.google}" target="_blank" style="display:inline-block;margin-top:8px;padding:8px 16px;background:#1a73e8;color:#fff;border-radius:6px;text-decoration:none;font-weight:bold;">Book on Google Flights →</a>
+              <a href="${links.elal}" target="_blank" style="display:inline-block;margin-top:8px;margin-left:8px;padding:8px 16px;background:#003087;color:#fff;border-radius:6px;text-decoration:none;font-weight:bold;">Search El Al →</a>
+            </div>`;
+          } else {
+            detailsHtml += `<div class="booking-banner">${w.bookingResult.booked ? '✅' : '⚠️'} ${w.bookingResult.reason}</div>`;
+          }
         }
         if (w.error) {
           detailsHtml += `<div class="error-detail">${w.error}</div>`;

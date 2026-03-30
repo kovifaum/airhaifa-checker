@@ -420,6 +420,37 @@
       </div>
     </div>
 
+      <!-- Test Mode -->
+      <div class="card" style="border-color: rgba(245,158,11,0.3);">
+        <div class="card-title">
+          <div class="icon" style="background:linear-gradient(135deg, rgba(245,158,11,0.3), rgba(239,68,68,0.2));border-color:rgba(245,158,11,0.4);">🧪</div>
+          Test Mode
+          <span class="subtitle">Verify everything works without real bookings</span>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Test Email To</label>
+            <input type="email" id="testEmail" placeholder="your@email.com" />
+          </div>
+          <div class="form-group">
+            <label>Test VText To</label>
+            <input type="tel" id="testVtext" placeholder="1234567890" />
+          </div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;">
+          <button class="btn-secondary" onclick="runTest('notify')" id="btnTestNotify">
+            🔔 Test Notifications
+          </button>
+          <button class="btn-secondary" onclick="runTest('scrape')" id="btnTestScrape">
+            🔍 Test Live Scrape (Air Haifa Apr 15)
+          </button>
+          <button class="btn-secondary" onclick="runTest('scrape-elal')" id="btnTestScrapeElal">
+            🔍 Test Live Scrape (El Al Apr 15)
+          </button>
+        </div>
+        <div id="testResult" style="margin-top:12px;font-size:13px;color:var(--text2);display:none;"></div>
+      </div>
+
     <!-- TAB: Active Monitors -->
     <div class="tab-content" id="tab-watches">
       <div class="watches-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
@@ -888,6 +919,69 @@
       if (pollTimer) clearInterval(pollTimer);
       countdownTimer = setInterval(updateCountdown, 1000);
       pollTimer = setInterval(loadStatus, 3000);
+    }
+
+    // ─── Test Mode ───────────────────────────────
+    async function runTest(type) {
+      const resultDiv = document.getElementById('testResult');
+      resultDiv.style.display = 'block';
+      resultDiv.innerHTML = '<div class="spinner" style="display:inline-block;margin-right:8px;"></div> Running test...';
+
+      try {
+        if (type === 'notify') {
+          const email = document.getElementById('testEmail').value.trim();
+          const vtext = document.getElementById('testVtext').value.trim();
+          if (!email && !vtext) { resultDiv.innerHTML = '⚠️ Enter an email or vtext number above'; return; }
+          const res = await fetch('/api/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, vtext }),
+          });
+          const data = await res.json();
+          if (data.success) {
+            let msg = '✅ Test complete! ';
+            if (data.results.emailSent) msg += 'Email sent. ';
+            if (data.results.emailError) msg += 'Email failed: ' + data.results.emailError + '. ';
+            if (data.results.vtextSent) msg += 'SMS sent. ';
+            if (data.results.vtextError) msg += 'SMS failed: ' + data.results.vtextError + '. ';
+            resultDiv.innerHTML = `<div style="color:var(--green2)">${msg}</div><div style="margin-top:4px;color:var(--text3)">Check your inbox for the test notification with fake flight data.</div>`;
+          } else {
+            resultDiv.innerHTML = '❌ ' + (data.error || 'Test failed');
+          }
+        } else if (type === 'scrape' || type === 'scrape-elal') {
+          const airline = type === 'scrape-elal' ? 'elal' : 'airhaifa';
+          const res = await fetch('/api/test-scrape', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              airline,
+              origin: 'TLV',
+              destination: airline === 'elal' ? 'JFK' : 'ATH',
+              date: '2026-04-15',
+            }),
+          });
+          const data = await res.json();
+          if (data.success && data.result) {
+            const r = data.result;
+            let html = r.available
+              ? `<div style="color:var(--green2)">✅ FOUND! ${r.freeSeats} seat(s) available</div>`
+              : `<div style="color:var(--amber)">❌ No seats found (${r.reason || 'unavailable'})</div>`;
+            html += `<div style="color:var(--text3);margin-top:4px">Scrape worked! The checker can read ${airline === 'elal' ? 'El Al' : 'Air Haifa'} data.</div>`;
+            if (r.flights && r.flights.length > 0) {
+              html += '<div style="margin-top:8px">';
+              r.flights.forEach(f => {
+                html += `<div style="padding:4px 0;font-size:12px;">${f.flightNum || '?'} ${f.from}→${f.to} | ${f.freeSeats} seats | ${f.price ? '$'+f.price : 'no price'}</div>`;
+              });
+              html += '</div>';
+            }
+            resultDiv.innerHTML = html;
+          } else {
+            resultDiv.innerHTML = `<div style="color:var(--red)">❌ Scrape failed: ${data.error || 'Unknown error'}</div><div style="color:var(--text3);margin-top:4px">This could mean the airline site blocked the request. Try again or check server logs.</div>`;
+          }
+        }
+      } catch (e) {
+        resultDiv.innerHTML = `<div style="color:var(--red)">❌ Error: ${e.message}</div>`;
+      }
     }
 
     // Enter key submits forms

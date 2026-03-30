@@ -825,6 +825,121 @@ app.delete('/api/profiles/:id', (req, res) => {
   res.json({ success: true });
 });
 
+// ─── Test Mode ────────────────────────────────────────────
+// Simulates finding a flight to test the full notification + booking pipeline
+app.post('/api/test', async (req, res) => {
+  const { email, vtext, autoBook, profileId, testType } = req.body;
+  if (!email && !vtext) return res.status(400).json({ error: 'Email or vtext required' });
+
+  console.log(`\n[TEST MODE] ─── Running test pipeline ───`);
+
+  // Create a fake "available" result
+  const fakeResult = {
+    available: true,
+    freeSeats: 2,
+    flights: [
+      {
+        airline: 'Air Haifa',
+        flightNum: 'E2-TEST',
+        from: 'TLV',
+        to: 'ATH',
+        departure: '2026-03-30T08:00:00',
+        arrival: '2026-03-30T10:30:00',
+        className: 'Economy',
+        freeSeats: 2,
+        price: 99,
+        currency: 'USD',
+        bookingUrl: 'https://airhaifa.com/flight-results/TLV-ATH/2026-03-30/NA/1/0/0',
+      },
+      {
+        airline: 'El Al',
+        flightNum: 'LY-TEST',
+        from: 'TLV',
+        to: 'JFK',
+        departure: '2026-03-31T22:00:00',
+        arrival: '2026-04-01T04:30:00',
+        className: 'Economy',
+        freeSeats: 4,
+        price: 549,
+        currency: 'USD',
+        bookingUrl: 'https://booking.elal.com/booking/flights?origin=TLV&destination=JFK',
+      },
+    ],
+    reason: 'TEST_MODE',
+  };
+
+  const fakeWatch = {
+    airline: 'airhaifa',
+    url: 'https://airhaifa.com/flight-results/TLV-ATH/2026-03-30/NA/1/0/0',
+    origin: 'TLV',
+    destination: 'ATH',
+    date: '2026-03-30',
+    autoBook: !!autoBook,
+    profileId: profileId || null,
+  };
+
+  const results = { emailSent: false, vtextSent: false, bookingAttempt: null };
+
+  // Test email
+  if (email) {
+    try {
+      await sendEmail(email, fakeWatch, fakeResult);
+      results.emailSent = true;
+      console.log(`[TEST] Email sent to ${email}`);
+    } catch (e) {
+      results.emailError = e.message;
+      console.error(`[TEST] Email failed: ${e.message}`);
+    }
+  }
+
+  // Test vtext SMS
+  if (vtext) {
+    try {
+      await sendVtext(vtext, fakeWatch, fakeResult);
+      results.vtextSent = true;
+      console.log(`[TEST] VText sent to ${vtext}`);
+    } catch (e) {
+      results.vtextError = e.message;
+      console.error(`[TEST] VText failed: ${e.message}`);
+    }
+  }
+
+  // Test auto-booking (only if testType === 'full' to avoid accidental bookings)
+  if (autoBook && profileId && testType === 'full') {
+    try {
+      const bookResult = await attemptAutoBook(fakeWatch, fakeResult);
+      results.bookingAttempt = bookResult;
+      console.log(`[TEST] Booking attempt: ${bookResult.booked ? 'SUCCESS' : bookResult.reason}`);
+    } catch (e) {
+      results.bookingAttempt = { booked: false, reason: e.message };
+    }
+  }
+
+  console.log(`[TEST MODE] Done.\n`);
+  res.json({ success: true, results, message: 'Test completed — check your email/SMS!' });
+});
+
+// ─── Live scrape test (actually checks a real URL) ────────
+app.post('/api/test-scrape', async (req, res) => {
+  const { airline, url, origin, destination, date } = req.body;
+  console.log(`\n[TEST SCRAPE] Testing real scrape...`);
+
+  try {
+    let result;
+    if (airline === 'elal') {
+      result = await checkElAl(origin || 'TLV', destination || 'JFK', date || '2026-04-15', 1);
+    } else {
+      const testUrl = url || buildAirHaifaUrl(origin || 'TLV', destination || 'ATH', date || '2026-04-15', 1);
+      result = await checkAirHaifa(testUrl);
+    }
+    console.log(`[TEST SCRAPE] Result: ${result.available ? 'AVAILABLE' : 'Not available'} (${result.freeSeats} seats)`);
+    res.json({ success: true, result });
+  } catch (e) {
+    console.error(`[TEST SCRAPE] Error: ${e.message}`);
+    res.json({ success: false, error: e.message });
+  }
+});
+
 // ─── Health check for Render ──────────────────────────────
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', watches: Object.keys(watches).length, uptime: process.uptime() });

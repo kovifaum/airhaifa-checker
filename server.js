@@ -697,18 +697,83 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
   const page = await br.newPage();
   await page.setViewport({ width: 1366, height: 768 });
 
+  // Use structured Google Flights URL instead of free-text query
+  // Format: /travel/flights/search?tfs=...  or simpler: use the query param approach
   const gfQuery = `Flights from ${origin} to ${destination} on ${date} one way ${passengers} passenger`;
   const searchUrl = `https://www.google.com/travel/flights?q=${encodeURIComponent(gfQuery)}&hl=en`;
 
   try {
-    console.log(`[ElAl] Google Flights fallback: ${searchUrl}`);
+    console.log(`[GF] Google Flights fallback: ${searchUrl}`);
     await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-    await new Promise(r => setTimeout(r, 6000));
+    await new Promise(r => setTimeout(r, 8000)); // extra wait for SPA rendering
+
+    // Debug: log what we see on the page
+    const debugInfo = await page.evaluate(() => {
+      const body = document.body;
+      if (!body) return { error: 'no body element' };
+      const text = body.innerText || '';
+      const firstChars = text.substring(0, 300);
+      // Check for common Google Flights selectors (they rotate class names)
+      const selectorChecks = {
+        'li.pIav2d': document.querySelectorAll('li.pIav2d').length,
+        'li[data-ved]': document.querySelectorAll('li[data-ved]').length,
+        'div[data-ved]': document.querySelectorAll('div[data-ved]').length,
+        '[role="listitem"]': document.querySelectorAll('[role="listitem"]').length,
+        'ul li': document.querySelectorAll('ul li').length,
+        // Look for price elements
+        'span with $': [...document.querySelectorAll('span')].filter(s => /^\$[\d,]+$/.test(s.textContent.trim())).length,
+        'any $ text': (text.match(/\$[\d,]+/g) || []).length,
+      };
+      return { firstChars, selectorChecks, title: document.title };
+    });
+    console.log(`[GF] Debug - Title: "${debugInfo.title}"`);
+    console.log(`[GF] Debug - Selectors:`, JSON.stringify(debugInfo.selectorChecks));
+    console.log(`[GF] Debug - Page starts with: "${(debugInfo.firstChars || '').substring(0, 150)}"`);
 
     const pageFlights = await page.evaluate(() => {
-      const cards = document.querySelectorAll('li.pIav2d');
       const results = [];
       const seen = new Set();
+
+      // Strategy 1: Try known Google Flights selectors (they rotate class names)
+      const knownSelectors = ['li.pIav2d', 'li[data-ved]', '[role="listitem"]'];
+      let cards = [];
+      for (const sel of knownSelectors) {
+        const found = document.querySelectorAll(sel);
+        if (found.length > 0 && found.length < 100) {
+          // Verify these look like flight cards (have prices)
+          const withPrices = [...found].filter(el => /\$[\d,]+/.test(el.innerText || ''));
+          if (withPrices.length > 0) {
+            cards = withPrices;
+            break;
+          }
+        }
+      }
+
+      // Strategy 2: If no cards found, scan ALL elements for flight-like content
+      if (cards.length === 0) {
+        const allEls = document.querySelectorAll('div, li, article, section');
+        for (const el of allEls) {
+          const text = el.innerText || '';
+          if (text.length < 30 || text.length > 2000) continue;
+          const hasPrice = /\$[\d,]+/.test(text);
+          const hasAirline = /(El\s*Al|Etihad|Turkish|Lufthansa|United|Delta|American|Swiss|LOT|Austrian|Arkia|Israir|British|Air France|KLM|Emirates|Qatar|Aegean|Ryanair|Wizz)/i.test(text);
+          const hasTime = /\d{1,2}:\d{2}\s*[AP]M/i.test(text);
+          const hasDuration = /\d+\s*hr/i.test(text);
+          if (hasPrice && hasAirline && (hasTime || hasDuration)) {
+            // Check this isn't a parent of an already-found card
+            let isDuplicate = false;
+            for (const existing of cards) {
+              if (el.contains(existing) || existing.contains(el)) {
+                isDuplicate = true;
+                break;
+              }
+            }
+            if (!isDuplicate) cards.push(el);
+          }
+        }
+      }
+
+      // Parse each flight card
       for (const card of cards) {
         const text = card.innerText || '';
         const priceMatch = text.match(/\$[\d,]+/);
@@ -716,13 +781,14 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
         const routeMatch = text.match(/([A-Z]{3})[–\-]([A-Z]{3})/);
         const stopsMatch = text.match(/(Nonstop|\d+\s*stop)/i);
         const durationMatch = text.match(/(\d+\s*hr\s*\d*\s*min?)/);
-        const timeMatch = text.match(/(\d{1,2}:\d{2}\s*[AP]M)/g);
-        if (priceMatch && airlineMatch) {
-          const key = airlineMatch[1] + '-' + priceMatch[0] + '-' + (timeMatch ? timeMatch[0] : '');
+        const timeMatch = text.match(/(\d{1,2}:\d{2}\s*[AP]M)/gi);
+        if (priceMatch) {
+          const airline = airlineMatch ? airlineMatch[1] : 'Unknown';
+          const key = airline + '-' + priceMatch[0] + '-' + (timeMatch ? timeMatch[0] : '');
           if (!seen.has(key)) {
             seen.add(key);
             results.push({
-              airline: airlineMatch[1], price: priceMatch[0],
+              airline, price: priceMatch[0],
               from: routeMatch ? routeMatch[1] : '', to: routeMatch ? routeMatch[2] : '',
               stops: stopsMatch ? stopsMatch[0] : '', duration: durationMatch ? durationMatch[1] : '',
               departure: timeMatch && timeMatch[0] ? timeMatch[0] : '',
@@ -731,22 +797,37 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
           }
         }
       }
-      const bodyText = document.body.innerText;
-      if (bodyText.includes('No flights match') || bodyText.includes('Try different dates')) return [{ noFlights: true }];
+
+      // Check for explicit "no flights" messages
+      const bodyText = (document.body && document.body.innerText) || '';
+      if (bodyText.includes('No flights match') || bodyText.includes('Try different dates') || bodyText.includes('No results found')) {
+        return [{ noFlights: true }];
+      }
+
       return results;
     });
 
     await page.close();
 
+    console.log(`[GF] Parsed ${pageFlights.length} flight result(s)${pageFlights[0]?.noFlights ? ' (no_flights message)' : ''}`);
+
     if (pageFlights.length > 0 && pageFlights[0]?.noFlights) {
       return { available: false, freeSeats: 0, flights: [], reason: 'no_flights', source: 'google_flights' };
     }
 
-    const elAlFlights = pageFlights.filter(f => f.airline && f.airline.toLowerCase().replace(/\s/g, '') === 'elal');
+    if (pageFlights.length === 0) {
+      console.log(`[GF] WARNING: Found 0 flights and no "no flights" message — Google may have changed DOM or blocked the request`);
+      return { available: false, freeSeats: 0, flights: [], reason: 'no_flights (parser found nothing — DOM may have changed)', source: 'google_flights' };
+    }
+
+    const elAlFlights = pageFlights.filter(f => f.airline && f.airline.toLowerCase().replace(/\s/g, '').includes('elal'));
     const allFlights = pageFlights;
 
-    const flightDetails = elAlFlights.map((f, i) => ({
-      airline: 'El Al', flightNum: `LY${i + 1}`,
+    // Include ALL airline flights, not just El Al — user wants to see all options
+    const flightsToShow = elAlFlights.length > 0 ? elAlFlights : allFlights;
+
+    const flightDetails = flightsToShow.map((f, i) => ({
+      airline: f.airline || 'Unknown', flightNum: f.airline && f.airline.toLowerCase().includes('el') ? `LY${i + 1}` : `${f.airline} ${i + 1}`,
       from: f.from || origin, to: f.to || destination,
       departure: f.departure || date, arrival: f.arrival || '',
       className: 'Economy', freeSeats: 1,
@@ -755,8 +836,8 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
     }));
 
     let reason = 'no_flights';
-    if (flightDetails.length > 0) reason = 'seats_available';
-    else if (allFlights.length > 0) reason = `No El Al flights found, but ${allFlights.length} other airline(s) on route`;
+    if (elAlFlights.length > 0) reason = 'seats_available';
+    else if (allFlights.length > 0) reason = 'seats_available';
 
     return {
       available: flightDetails.length > 0,

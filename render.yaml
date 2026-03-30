@@ -4,6 +4,10 @@ services:
     runtime: docker
     plan: starter
     healthCheckPath: /health
+    disk:
+      name: skywatch-data
+      mountPath: /app/data
+      sizeGB: 1
     envVars:
       - key: GMAIL_USER
         sync: false
@@ -18,6 +22,10 @@ services:
       - key: BRIGHTDATA_USER
         sync: false
       - key: BRIGHTDATA_PASS
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ENCRYPTION_KEY
         sync: false
       - key: CHECK_INTERVAL_MS
         value: "30000"

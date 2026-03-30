@@ -545,10 +545,11 @@ async function checkFlight(watch) {
 
 // ─── Auto-booking (Air Haifa) ─────────────────────────────
 async function attemptAutoBook(watch, flightResult) {
-  if (!watch.autoBook || !watch.profileId) return { booked: false, reason: 'Auto-book not enabled' };
+  if (!watch.autoBook) return { booked: false, reason: 'Auto-book toggle is off' };
+  if (!watch.profileId) return { booked: false, reason: 'No profile selected — select a profile when adding the monitor' };
 
   const profile = userProfiles[watch.profileId];
-  if (!profile) return { booked: false, reason: 'No user profile found' };
+  if (!profile) return { booked: false, reason: 'Profile was deleted (server restarted?) — re-add your profile in My Info tab and create a new monitor' };
 
   console.log(`[AutoBook] Attempting to book for ${profile.firstName} ${profile.lastName}...`);
 

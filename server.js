@@ -691,18 +691,91 @@ async function checkElAlDirect(origin, destination, date, passengers, bookingUrl
   }
 }
 
+// ─── Flight data via Amadeus API (reliable, no scraping) ─────
+async function checkFlightsViaAPI(origin, destination, date, passengers, bookingUrl) {
+  const AMADEUS_KEY = process.env.AMADEUS_API_KEY;
+  const AMADEUS_SECRET = process.env.AMADEUS_API_SECRET;
+
+  if (!AMADEUS_KEY || !AMADEUS_SECRET) {
+    console.log('[API] No Amadeus credentials, skipping API check');
+    return null;
+  }
+
+  try {
+    const fetch = (await import('node-fetch')).default;
+
+    // Get Amadeus OAuth token
+    console.log('[API] Authenticating with Amadeus...');
+    const tokenRes = await fetch('https://api.amadeus.com/v1/security/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=client_credentials&client_id=${AMADEUS_KEY}&client_secret=${AMADEUS_SECRET}`,
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) {
+      console.log('[API] Amadeus auth failed:', JSON.stringify(tokenData));
+      return null;
+    }
+
+    // Search flights
+    const searchUrl = `https://api.amadeus.com/v2/shopping/flight-offers?originLocationCode=${origin}&destinationLocationCode=${destination}&departureDate=${date}&adults=${passengers}&nonStop=false&max=20&currencyCode=USD`;
+    console.log(`[API] Searching flights: ${origin}→${destination} on ${date}`);
+    const flightRes = await fetch(searchUrl, {
+      headers: { 'Authorization': `Bearer ${tokenData.access_token}` },
+    });
+    const flightData = await flightRes.json();
+
+    if (!flightData.data || flightData.data.length === 0) {
+      console.log('[API] No flights found via Amadeus');
+      return { available: false, freeSeats: 0, flights: [], reason: 'no_flights', source: 'amadeus_api' };
+    }
+
+    const flights = flightData.data.map((offer, i) => {
+      const seg = offer.itineraries[0]?.segments[0];
+      const lastSeg = offer.itineraries[0]?.segments[offer.itineraries[0].segments.length - 1];
+      const stops = (offer.itineraries[0]?.segments.length || 1) - 1;
+      return {
+        airline: seg?.carrierCode || 'Unknown',
+        flightNum: seg ? `${seg.carrierCode}${seg.number}` : `FL${i + 1}`,
+        from: seg?.departure?.iataCode || origin,
+        to: lastSeg?.arrival?.iataCode || destination,
+        departure: seg?.departure?.at || date,
+        arrival: lastSeg?.arrival?.at || '',
+        className: offer.travelerPricings?.[0]?.fareDetailsBySegment?.[0]?.cabin || 'ECONOMY',
+        freeSeats: offer.numberOfBookableSeats || 1,
+        price: '$' + offer.price?.total,
+        currency: offer.price?.currency || 'USD',
+        stops: stops === 0 ? 'Nonstop' : `${stops} stop`,
+        duration: offer.itineraries[0]?.duration?.replace('PT', '').toLowerCase() || '',
+        bookingUrl: bookingUrl,
+        source: 'amadeus_api',
+      };
+    });
+
+    console.log(`[API] Amadeus found ${flights.length} flight(s)`);
+    return {
+      available: true,
+      freeSeats: flights.reduce((s, f) => s + (f.freeSeats || 0), 0),
+      flights,
+      reason: 'seats_available',
+      source: 'amadeus_api',
+    };
+  } catch (e) {
+    console.log(`[API] Amadeus error: ${e.message}`);
+    return null;
+  }
+}
+
 // ─── Google Flights fallback for El Al ───────────────────
 async function checkElAlGoogleFlights(origin, destination, date, passengers, bookingUrl) {
-  // Use BrightData proxy if available — Google blocks Render's datacenter IPs with CAPTCHA
-  const useProxy = hasBrightData;
-  const br = useProxy ? await getProxyBrowser() : await getBrowser();
+  // Strategy: Try Amadeus API first (reliable), then Google Flights scraping as fallback
+  const apiResult = await checkFlightsViaAPI(origin, destination, date, passengers, bookingUrl);
+  if (apiResult) return apiResult;
+
+  // Google Flights scraping — use DIRECT (no proxy, BrightData blocks Google)
+  const br = await getBrowser();
   const page = await br.newPage();
   await page.setViewport({ width: 1366, height: 768 });
-
-  if (useProxy) {
-    await page.authenticate({ username: BRIGHTDATA_USER, password: BRIGHTDATA_PASS });
-    console.log(`[GF] Using BrightData residential proxy to avoid Google CAPTCHA`);
-  }
 
   await page.setExtraHTTPHeaders({
     'Accept-Language': 'en-US,en;q=0.9',
@@ -713,53 +786,48 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
   const searchUrl = `https://www.google.com/travel/flights?q=${encodeURIComponent(gfQuery)}&hl=en`;
 
   try {
-    console.log(`[GF] Google Flights fallback: ${searchUrl}`);
-    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 90000 });
-    await new Promise(r => setTimeout(r, 8000)); // extra wait for SPA rendering
+    console.log(`[GF] Google Flights scraping: ${searchUrl}`);
+    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+    await new Promise(r => setTimeout(r, 8000));
 
-    // Debug: log what we see on the page
+    // Debug
     const debugInfo = await page.evaluate(() => {
       const body = document.body;
-      if (!body) return { error: 'no body element' };
+      if (!body) return { error: 'no body' };
       const text = body.innerText || '';
-      const firstChars = text.substring(0, 300);
-      // Check for common Google Flights selectors (they rotate class names)
-      const selectorChecks = {
-        'li.pIav2d': document.querySelectorAll('li.pIav2d').length,
-        'li[data-ved]': document.querySelectorAll('li[data-ved]').length,
-        'div[data-ved]': document.querySelectorAll('div[data-ved]').length,
-        '[role="listitem"]': document.querySelectorAll('[role="listitem"]').length,
-        'ul li': document.querySelectorAll('ul li').length,
-        // Look for price elements
-        'span with $': [...document.querySelectorAll('span')].filter(s => /^\$[\d,]+$/.test(s.textContent.trim())).length,
-        'any $ text': (text.match(/\$[\d,]+/g) || []).length,
+      return {
+        title: document.title,
+        hasCaptcha: text.includes('unusual traffic') || text.includes('not a robot'),
+        priceCount: (text.match(/\$[\d,]+/g) || []).length,
+        preview: text.substring(0, 200),
       };
-      return { firstChars, selectorChecks, title: document.title };
     });
-    console.log(`[GF] Debug - Title: "${debugInfo.title}"`);
-    console.log(`[GF] Debug - Selectors:`, JSON.stringify(debugInfo.selectorChecks));
-    console.log(`[GF] Debug - Page starts with: "${(debugInfo.firstChars || '').substring(0, 150)}"`);
+    console.log(`[GF] Debug: title="${debugInfo.title}" captcha=${debugInfo.hasCaptcha} prices=${debugInfo.priceCount}`);
+
+    // If Google shows CAPTCHA, don't waste time parsing
+    if (debugInfo.hasCaptcha) {
+      console.log(`[GF] Google CAPTCHA detected — scraping not possible from this IP`);
+      await page.close();
+      // Return a special result so the checker knows scraping is broken
+      return { available: false, freeSeats: 0, flights: [], reason: 'google_captcha', source: 'google_flights' };
+    }
 
     const pageFlights = await page.evaluate(() => {
       const results = [];
       const seen = new Set();
 
-      // Strategy 1: Try known Google Flights selectors (they rotate class names)
+      // Try known Google Flights selectors
       const knownSelectors = ['li.pIav2d', 'li[data-ved]', '[role="listitem"]'];
       let cards = [];
       for (const sel of knownSelectors) {
         const found = document.querySelectorAll(sel);
         if (found.length > 0 && found.length < 100) {
-          // Verify these look like flight cards (have prices)
           const withPrices = [...found].filter(el => /\$[\d,]+/.test(el.innerText || ''));
-          if (withPrices.length > 0) {
-            cards = withPrices;
-            break;
-          }
+          if (withPrices.length > 0) { cards = withPrices; break; }
         }
       }
 
-      // Strategy 2: If no cards found, scan ALL elements for flight-like content
+      // Fallback: scan all elements
       if (cards.length === 0) {
         const allEls = document.querySelectorAll('div, li, article, section');
         for (const el of allEls) {
@@ -770,20 +838,15 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
           const hasTime = /\d{1,2}:\d{2}\s*[AP]M/i.test(text);
           const hasDuration = /\d+\s*hr/i.test(text);
           if (hasPrice && hasAirline && (hasTime || hasDuration)) {
-            // Check this isn't a parent of an already-found card
             let isDuplicate = false;
             for (const existing of cards) {
-              if (el.contains(existing) || existing.contains(el)) {
-                isDuplicate = true;
-                break;
-              }
+              if (el.contains(existing) || existing.contains(el)) { isDuplicate = true; break; }
             }
             if (!isDuplicate) cards.push(el);
           }
         }
       }
 
-      // Parse each flight card
       for (const card of cards) {
         const text = card.innerText || '';
         const priceMatch = text.match(/\$[\d,]+/);
@@ -808,36 +871,27 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
         }
       }
 
-      // Check for explicit "no flights" messages
       const bodyText = (document.body && document.body.innerText) || '';
-      if (bodyText.includes('No flights match') || bodyText.includes('Try different dates') || bodyText.includes('No results found')) {
-        return [{ noFlights: true }];
-      }
-
+      if (bodyText.includes('No flights match') || bodyText.includes('Try different dates')) return [{ noFlights: true }];
       return results;
     });
 
     await page.close();
-
-    console.log(`[GF] Parsed ${pageFlights.length} flight result(s)${pageFlights[0]?.noFlights ? ' (no_flights message)' : ''}`);
+    console.log(`[GF] Parsed ${pageFlights.length} flight(s)`);
 
     if (pageFlights.length > 0 && pageFlights[0]?.noFlights) {
       return { available: false, freeSeats: 0, flights: [], reason: 'no_flights', source: 'google_flights' };
     }
-
     if (pageFlights.length === 0) {
-      console.log(`[GF] WARNING: Found 0 flights and no "no flights" message — Google may have changed DOM or blocked the request`);
-      return { available: false, freeSeats: 0, flights: [], reason: 'no_flights (parser found nothing — DOM may have changed)', source: 'google_flights' };
+      return { available: false, freeSeats: 0, flights: [], reason: 'no_flights (parser empty)', source: 'google_flights' };
     }
 
     const elAlFlights = pageFlights.filter(f => f.airline && f.airline.toLowerCase().replace(/\s/g, '').includes('elal'));
-    const allFlights = pageFlights;
-
-    // Include ALL airline flights, not just El Al — user wants to see all options
-    const flightsToShow = elAlFlights.length > 0 ? elAlFlights : allFlights;
+    const flightsToShow = elAlFlights.length > 0 ? elAlFlights : pageFlights;
 
     const flightDetails = flightsToShow.map((f, i) => ({
-      airline: f.airline || 'Unknown', flightNum: f.airline && f.airline.toLowerCase().includes('el') ? `LY${i + 1}` : `${f.airline} ${i + 1}`,
+      airline: f.airline || 'Unknown',
+      flightNum: f.airline && f.airline.toLowerCase().includes('el') ? `LY${i + 1}` : `${f.airline} ${i + 1}`,
       from: f.from || origin, to: f.to || destination,
       departure: f.departure || date, arrival: f.arrival || '',
       className: 'Economy', freeSeats: 1,
@@ -845,16 +899,13 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
       bookingUrl: bookingUrl, source: 'google_flights',
     }));
 
-    let reason = 'no_flights';
-    if (elAlFlights.length > 0) reason = 'seats_available';
-    else if (allFlights.length > 0) reason = 'seats_available';
-
     return {
       available: flightDetails.length > 0,
       freeSeats: flightDetails.length,
       flights: flightDetails,
-      reason, source: 'google_flights',
-      allAirlines: allFlights.map(f => ({
+      reason: flightDetails.length > 0 ? 'seats_available' : 'no_flights',
+      source: 'google_flights',
+      allAirlines: pageFlights.map(f => ({
         airline: f.airline, price: f.price, stops: f.stops,
         departure: f.departure, arrival: f.arrival, duration: f.duration,
       })),

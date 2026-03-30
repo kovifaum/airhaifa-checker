@@ -31,6 +31,10 @@ services:
         sync: false
       - key: ADMIN_PASS
         sync: false
+      - key: AMADEUS_API_KEY
+        sync: false
+      - key: AMADEUS_API_SECRET
+        sync: false
       - key: CHECK_INTERVAL_MS
         value: "30000"
       - key: PUPPETEER_EXECUTABLE_PATH

@@ -11,6 +11,14 @@ services:
         sync: false
       - key: TWOCAPTCHA_KEY
         sync: false
+      - key: BRIGHTDATA_HOST
+        sync: false
+      - key: BRIGHTDATA_PORT
+        sync: false
+      - key: BRIGHTDATA_USER
+        sync: false
+      - key: BRIGHTDATA_PASS
+        sync: false
       - key: CHECK_INTERVAL_MS
         value: "30000"
       - key: PUPPETEER_EXECUTABLE_PATH

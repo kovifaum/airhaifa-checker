@@ -12,6 +12,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 const CHECK_INTERVAL_MS = parseInt(process.env.CHECK_INTERVAL_MS || '30000'); // 30 seconds
 const TWOCAPTCHA_KEY = process.env.TWOCAPTCHA_KEY || '';
 
+// BrightData proxy config (for bypassing airline bot protection)
+const BRIGHTDATA_HOST = process.env.BRIGHTDATA_HOST || '';
+const BRIGHTDATA_PORT = process.env.BRIGHTDATA_PORT || '22225';
+const BRIGHTDATA_USER = process.env.BRIGHTDATA_USER || '';
+const BRIGHTDATA_PASS = process.env.BRIGHTDATA_PASS || '';
+const hasBrightData = !!(BRIGHTDATA_HOST && BRIGHTDATA_USER && BRIGHTDATA_PASS);
+
 // ─── In-memory stores ─────────────────────────────────────
 const watches = {};
 let checkInterval = null;
@@ -171,25 +178,277 @@ async function checkAirHaifa(url) {
   }
 }
 
-// ─── El Al checker (via Google Flights — El Al blocks bots directly) ─────
+// ─── BrightData proxy browser (for El Al / protected sites) ──
+let proxyBrowser = null;
+
+async function getProxyBrowser() {
+  if (!hasBrightData) throw new Error('BrightData proxy not configured - add BRIGHTDATA_HOST, BRIGHTDATA_USER, BRIGHTDATA_PASS to .env');
+  if (proxyBrowser && proxyBrowser.connected) return proxyBrowser;
+
+  console.log('[ProxyBrowser] Launching Puppeteer with BrightData proxy...');
+  const proxyUrl = `http://${BRIGHTDATA_HOST}:${BRIGHTDATA_PORT}`;
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+  const launchOpts = {
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-infobars',
+      '--window-size=1366,768',
+      `--proxy-server=${proxyUrl}`,
+    ],
+  };
+  if (executablePath) launchOpts.executablePath = executablePath;
+  proxyBrowser = await puppeteerExtra.launch(launchOpts);
+  return proxyBrowser;
+}
+
+// ─── El Al checker (BrightData proxy → direct scrape, fallback to Google Flights) ─────
 async function checkElAl(origin, destination, date, passengers = 1) {
+  const elAlBookingUrl = `https://www.elal.com/en/booking/flight-select/?isOneWay=true&origin=${origin}&destination=${destination}&dep=${date}&adult=${passengers}`;
+
+  // Try BrightData direct El Al scraping first
+  if (hasBrightData) {
+    try {
+      const result = await checkElAlDirect(origin, destination, date, passengers, elAlBookingUrl);
+      if (result) return result;
+    } catch (e) {
+      console.log(`[ElAl] Direct scrape failed (${e.message}), falling back to Google Flights...`);
+    }
+  } else {
+    console.log('[ElAl] No BrightData proxy configured, using Google Flights fallback...');
+  }
+
+  // Fallback: Google Flights
+  return await checkElAlGoogleFlights(origin, destination, date, passengers, elAlBookingUrl);
+}
+
+// ─── Direct El Al scraping via BrightData proxy ──────────
+async function checkElAlDirect(origin, destination, date, passengers, bookingUrl) {
+  const br = await getProxyBrowser();
+  const page = await br.newPage();
+  await page.setViewport({ width: 1366, height: 768 });
+
+  // Authenticate with BrightData proxy
+  await page.authenticate({
+    username: BRIGHTDATA_USER,
+    password: BRIGHTDATA_PASS,
+  });
+
+  // Set realistic headers
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  });
+
+  let flightApiData = null;
+
+  // Intercept El Al's API responses
+  page.on('response', async (response) => {
+    const resUrl = response.url();
+    try {
+      const ct = response.headers()['content-type'] || '';
+      if (ct.includes('json') && (
+        resUrl.includes('/api/') ||
+        resUrl.includes('flight') ||
+        resUrl.includes('search') ||
+        resUrl.includes('availability') ||
+        resUrl.includes('offer') ||
+        resUrl.includes('fare')
+      )) {
+        const text = await response.text();
+        if (text.length > 100) { // skip tiny responses
+          try {
+            const data = JSON.parse(text);
+            // Look for flight data in various structures El Al might use
+            if (data && (
+              data.flights || data.results || data.outbound || data.Flights ||
+              data.FlightResults || data.offers || data.Offers ||
+              data.journeys || data.Journeys || data.itineraries ||
+              (Array.isArray(data) && data.length > 0 && (data[0].price || data[0].fare || data[0].flight))
+            )) {
+              console.log(`[ElAl Direct] Intercepted API data from: ${resUrl.substring(0, 100)}`);
+              flightApiData = data;
+            }
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+  });
+
+  const searchUrl = `https://www.elal.com/en/booking/flight-select/?isOneWay=true&origin=${origin}&destination=${destination}&dep=${date}&adult=${passengers}`;
+
+  try {
+    console.log(`[ElAl Direct] Navigating via BrightData proxy: ${searchUrl}`);
+    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 90000 });
+
+    // Check if we got blocked
+    const pageTitle = await page.title();
+    if (pageTitle.toLowerCase().includes('access denied') || pageTitle.toLowerCase().includes('blocked')) {
+      await page.close();
+      throw new Error('Still blocked by El Al even with proxy');
+    }
+
+    // Wait for SPA to render flight results
+    await new Promise(r => setTimeout(r, 10000));
+
+    // Try waiting for flight-specific elements
+    try {
+      await page.waitForSelector('[class*="flight"], [class*="Flight"], [class*="offer"], [class*="Offer"], [class*="journey"], [class*="result"], [class*="itinerary"], [data-testid*="flight"]', { timeout: 15000 });
+      console.log('[ElAl Direct] Flight elements found on page!');
+    } catch (e) {
+      console.log('[ElAl Direct] No obvious flight elements found, trying DOM scan...');
+    }
+
+    // DOM scraping - broader search patterns
+    const pageFlights = await page.evaluate(() => {
+      const results = [];
+
+      // Strategy 1: Look for any elements with price + flight-like content
+      const allElements = document.querySelectorAll('div, li, article, section, tr');
+      for (const el of allElements) {
+        const text = el.innerText || '';
+        if (text.length < 20 || text.length > 2000) continue; // skip too small/large
+
+        const hasPrice = /\$[\d,]+|₪[\d,]+|\d+\s*(USD|ILS|EUR|NIS)/i.test(text);
+        const hasTime = /\d{1,2}:\d{2}/.test(text);
+        const hasFlightIndicator = /(LY\s*\d|nonstop|direct|stop|economy|business|class)/i.test(text);
+
+        if (hasPrice && (hasTime || hasFlightIndicator)) {
+          const priceMatch = text.match(/\$[\d,]+/);
+          const ilsPriceMatch = text.match(/₪([\d,]+)/);
+          const timeMatches = text.match(/\d{1,2}:\d{2}/g);
+          const flightNumMatch = text.match(/LY\s*\d+/i);
+          const stopsMatch = text.match(/(nonstop|direct|\d+\s*stop)/i);
+
+          results.push({
+            price: priceMatch ? priceMatch[0] : (ilsPriceMatch ? '₪' + ilsPriceMatch[1] : null),
+            times: timeMatches || [],
+            flightNum: flightNumMatch ? flightNumMatch[0] : null,
+            stops: stopsMatch ? stopsMatch[0] : null,
+            text: text.substring(0, 400),
+          });
+        }
+      }
+
+      // Strategy 2: Check for no-results messages
+      const bodyText = document.body.innerText;
+      if (bodyText.match(/no (flights?|results?|availability)/i) || bodyText.includes('אין טיסות')) {
+        return [{ noFlights: true }];
+      }
+
+      // Deduplicate by price+time combo
+      const unique = [];
+      const seen = new Set();
+      for (const r of results) {
+        const key = (r.price || '') + (r.times[0] || '') + (r.flightNum || '');
+        if (!seen.has(key) && key.length > 0) {
+          seen.add(key);
+          unique.push(r);
+        }
+      }
+      return unique;
+    });
+
+    await page.close();
+
+    // Process API data first (most reliable)
+    if (flightApiData) {
+      const flightArrayKeys = ['flights', 'results', 'Flights', 'FlightResults', 'offers', 'Offers', 'journeys', 'Journeys', 'itineraries'];
+      let flights = [];
+      for (const key of flightArrayKeys) {
+        if (flightApiData[key]) {
+          flights = Array.isArray(flightApiData[key]) ? flightApiData[key] : Object.values(flightApiData[key]);
+          break;
+        }
+      }
+      if (Array.isArray(flightApiData) && flightApiData.length > 0) flights = flightApiData;
+
+      if (flights.length > 0) {
+        const flightDetails = flights.map((f, i) => ({
+          airline: 'El Al',
+          flightNum: f.flightNumber || f.flightNum || f.number || f.flightNo || `LY${i + 1}`,
+          from: origin,
+          to: destination,
+          departure: f.departureTime || f.departure || f.depTime || date,
+          arrival: f.arrivalTime || f.arrival || f.arrTime || '',
+          className: f.cabin || f.class || f.cabinClass || 'Economy',
+          freeSeats: f.seatsAvailable || f.seats || f.availability || 1,
+          price: f.price || f.totalPrice || f.fare || f.amount || null,
+          currency: 'USD',
+          bookingUrl: bookingUrl,
+          source: 'direct',
+        }));
+        const totalSeats = flightDetails.reduce((s, f) => s + (f.freeSeats || 0), 0);
+        console.log(`[ElAl Direct] API: Found ${flightDetails.length} flight(s), ${totalSeats} total seats`);
+        return {
+          available: true,
+          freeSeats: totalSeats,
+          flights: flightDetails,
+          reason: 'seats_available',
+          source: 'elal_direct_api',
+        };
+      }
+    }
+
+    // Process DOM data
+    if (pageFlights.length > 0 && !pageFlights[0]?.noFlights) {
+      const flightDetails = pageFlights.filter(f => f.price).map((f, i) => ({
+        airline: 'El Al',
+        flightNum: f.flightNum || `LY${i + 1}`,
+        from: origin,
+        to: destination,
+        departure: f.times[0] || date,
+        arrival: f.times[1] || '',
+        className: 'Economy',
+        freeSeats: 1,
+        price: f.price,
+        stops: f.stops,
+        currency: 'USD',
+        bookingUrl: bookingUrl,
+        source: 'direct_dom',
+      }));
+      if (flightDetails.length > 0) {
+        console.log(`[ElAl Direct] DOM: Found ${flightDetails.length} flight(s)`);
+        return {
+          available: true,
+          freeSeats: flightDetails.length,
+          flights: flightDetails,
+          reason: 'seats_available',
+          source: 'elal_direct_dom',
+        };
+      }
+    }
+
+    if (pageFlights.length > 0 && pageFlights[0]?.noFlights) {
+      return { available: false, freeSeats: 0, flights: [], reason: 'no_flights', source: 'elal_direct' };
+    }
+
+    // Couldn't parse anything — don't return, let it fall through to Google Flights
+    throw new Error('Could not parse El Al page - DOM structure unrecognized');
+  } catch (e) {
+    try { await page.close(); } catch (_) {}
+    throw e;
+  }
+}
+
+// ─── Google Flights fallback for El Al ───────────────────
+async function checkElAlGoogleFlights(origin, destination, date, passengers, bookingUrl) {
   const br = await getBrowser();
   const page = await br.newPage();
   await page.setViewport({ width: 1366, height: 768 });
 
-  // Google Flights query-based URL (easy to construct, handles one-way)
   const gfQuery = `Flights from ${origin} to ${destination} on ${date} one way ${passengers} passenger`;
   const searchUrl = `https://www.google.com/travel/flights?q=${encodeURIComponent(gfQuery)}&hl=en`;
-  // Direct El Al booking URL for user reference
-  const elAlBookingUrl = `https://www.elal.com/en/booking/flight-select/?isOneWay=true&origin=${origin}&destination=${destination}&dep=${date}&adult=${passengers}`;
 
   try {
-    console.log(`[ElAl] Using Google Flights: ${searchUrl}`);
+    console.log(`[ElAl] Google Flights fallback: ${searchUrl}`);
     await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-    // Wait for flight results to render (Google Flights is a SPA)
     await new Promise(r => setTimeout(r, 6000));
 
-    // Scrape flight cards from Google Flights
     const pageFlights = await page.evaluate(() => {
       const cards = document.querySelectorAll('li.pIav2d');
       const results = [];
@@ -202,82 +461,55 @@ async function checkElAl(origin, destination, date, passengers = 1) {
         const stopsMatch = text.match(/(Nonstop|\d+\s*stop)/i);
         const durationMatch = text.match(/(\d+\s*hr\s*\d*\s*min?)/);
         const timeMatch = text.match(/(\d{1,2}:\d{2}\s*[AP]M)/g);
-
         if (priceMatch && airlineMatch) {
           const key = airlineMatch[1] + '-' + priceMatch[0] + '-' + (timeMatch ? timeMatch[0] : '');
           if (!seen.has(key)) {
             seen.add(key);
             results.push({
-              airline: airlineMatch[1],
-              price: priceMatch[0],
-              from: routeMatch ? routeMatch[1] : '',
-              to: routeMatch ? routeMatch[2] : '',
-              stops: stopsMatch ? stopsMatch[0] : '',
-              duration: durationMatch ? durationMatch[1] : '',
+              airline: airlineMatch[1], price: priceMatch[0],
+              from: routeMatch ? routeMatch[1] : '', to: routeMatch ? routeMatch[2] : '',
+              stops: stopsMatch ? stopsMatch[0] : '', duration: durationMatch ? durationMatch[1] : '',
               departure: timeMatch && timeMatch[0] ? timeMatch[0] : '',
               arrival: timeMatch && timeMatch[1] ? timeMatch[1] : '',
             });
           }
         }
       }
-      // Check for "no flights" state
       const bodyText = document.body.innerText;
-      if (bodyText.includes('No flights match') || bodyText.includes('Try different dates')) {
-        return [{ noFlights: true }];
-      }
+      if (bodyText.includes('No flights match') || bodyText.includes('Try different dates')) return [{ noFlights: true }];
       return results;
     });
 
     await page.close();
 
     if (pageFlights.length > 0 && pageFlights[0]?.noFlights) {
-      return { available: false, freeSeats: 0, flights: [], reason: 'no_flights' };
+      return { available: false, freeSeats: 0, flights: [], reason: 'no_flights', source: 'google_flights' };
     }
 
-    // Filter for El Al flights specifically
-    const elAlFlights = pageFlights.filter(f =>
-      f.airline && f.airline.toLowerCase().replace(/\s/g, '') === 'elal'
-    );
-
-    // Also keep all flights for reference
+    const elAlFlights = pageFlights.filter(f => f.airline && f.airline.toLowerCase().replace(/\s/g, '') === 'elal');
     const allFlights = pageFlights;
 
-    const flightDetails = (elAlFlights.length > 0 ? elAlFlights : []).map((f, i) => ({
-      airline: 'El Al',
-      flightNum: `LY${i + 1}`,
-      from: f.from || origin,
-      to: f.to || destination,
-      departure: f.departure || date,
-      arrival: f.arrival || '',
-      className: 'Economy',
-      freeSeats: 1, // Google Flights doesn't show seat count
-      price: f.price,
-      currency: 'USD',
-      stops: f.stops,
-      duration: f.duration,
-      bookingUrl: elAlBookingUrl,
+    const flightDetails = elAlFlights.map((f, i) => ({
+      airline: 'El Al', flightNum: `LY${i + 1}`,
+      from: f.from || origin, to: f.to || destination,
+      departure: f.departure || date, arrival: f.arrival || '',
+      className: 'Economy', freeSeats: 1,
+      price: f.price, currency: 'USD', stops: f.stops, duration: f.duration,
+      bookingUrl: bookingUrl, source: 'google_flights',
     }));
 
-    // If no El Al flights but other airlines found, note that
     let reason = 'no_flights';
-    if (flightDetails.length > 0) {
-      reason = 'seats_available';
-    } else if (allFlights.length > 0) {
-      reason = `No El Al flights found, but ${allFlights.length} other airline(s) available on this route`;
-    }
+    if (flightDetails.length > 0) reason = 'seats_available';
+    else if (allFlights.length > 0) reason = `No El Al flights found, but ${allFlights.length} other airline(s) on route`;
 
     return {
       available: flightDetails.length > 0,
       freeSeats: flightDetails.length,
       flights: flightDetails,
-      reason,
+      reason, source: 'google_flights',
       allAirlines: allFlights.map(f => ({
-        airline: f.airline,
-        price: f.price,
-        stops: f.stops,
-        departure: f.departure,
-        arrival: f.arrival,
-        duration: f.duration,
+        airline: f.airline, price: f.price, stops: f.stops,
+        departure: f.departure, arrival: f.arrival, duration: f.duration,
       })),
     };
   } catch (e) {
@@ -933,13 +1165,15 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(` Server running at http://0.0.0.0:${PORT}`);
   console.log(` Checking every ${CHECK_INTERVAL_MS / 1000} seconds`);
   console.log(` 2Captcha: ${TWOCAPTCHA_KEY ? 'Configured' : 'Not configured'}`);
+  console.log(` BrightData: ${hasBrightData ? 'Configured (direct El Al scraping)' : 'Not configured (Google Flights fallback)'}`);
   console.log(` Gmail: ${process.env.GMAIL_USER ? 'Configured' : 'Not configured'}`);
   console.log('');
   startChecker();
 });
 
 process.on('SIGINT', async () => {
-  console.log('\n[Shutdown] Closing browser...');
+  console.log('\n[Shutdown] Closing browsers...');
   if (browser) await browser.close();
+  if (proxyBrowser) await proxyBrowser.close();
   process.exit(0);
 });

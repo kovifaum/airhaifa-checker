@@ -15,6 +15,7 @@
     "puppeteer": "^22.0.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "pg": "^8.13.1",
     "uuid": "^9.0.1"
   },
   "engines": {

@@ -4,11 +4,11 @@ services:
     runtime: docker
     plan: starter
     healthCheckPath: /health
-    disk:
-      name: skywatch-data
-      mountPath: /app/data
-      sizeGB: 1
     envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: skywatch-db
+          property: connectionString
       - key: GMAIL_USER
         sync: false
       - key: GMAIL_PASS
@@ -27,7 +27,17 @@ services:
         sync: false
       - key: ENCRYPTION_KEY
         sync: false
+      - key: ADMIN_USER
+        sync: false
+      - key: ADMIN_PASS
+        sync: false
       - key: CHECK_INTERVAL_MS
         value: "30000"
       - key: PUPPETEER_EXECUTABLE_PATH
         value: "/usr/bin/google-chrome-stable"
+
+databases:
+  - name: skywatch-db
+    plan: free
+    databaseName: skywatch
+    user: skywatch

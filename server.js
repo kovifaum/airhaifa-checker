@@ -5,6 +5,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
+const { Pool } = require('pg');
 
 // Auth & encryption config
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
@@ -81,10 +82,53 @@ function verifyToken(token) {
   } catch (e) { return null; }
 }
 
-// User store
+// User store (in-memory, synced to DB or file)
 const users = {};
 
-// ─── Persistence (JSON file on disk) ─────────────────────
+// ─── PostgreSQL (persistent) or file-based fallback ──────
+const DATABASE_URL = process.env.DATABASE_URL;
+let db = null;
+
+if (DATABASE_URL) {
+  db = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false }, // Render requires SSL
+  });
+  console.log('[DB] PostgreSQL connected');
+} else {
+  console.log('[DB] No DATABASE_URL — using file-based storage (will be wiped on deploy)');
+}
+
+// Create tables if using Postgres
+async function initDB() {
+  if (!db) return;
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        data JSONB NOT NULL
+      )
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS profiles (
+        user_id TEXT PRIMARY KEY,
+        data JSONB NOT NULL
+      )
+    `);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS watches (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        data JSONB NOT NULL
+      )
+    `);
+    console.log('[DB] Tables ready');
+  } catch (e) {
+    console.error('[DB] Table creation failed:', e.message);
+  }
+}
+
+// ─── File-based fallback paths ───────────────────────────
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
@@ -93,49 +137,96 @@ function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-function saveUsers() {
-  try {
-    ensureDataDir();
-    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
-  } catch (e) { console.error('[Persist] Failed to save users:', e.message); }
+// ─── Save / Load functions (DB or file) ──────────────────
+async function saveUsers() {
+  if (db) {
+    try {
+      for (const [username, data] of Object.entries(users)) {
+        await db.query(
+          `INSERT INTO users (username, data) VALUES ($1, $2)
+           ON CONFLICT (username) DO UPDATE SET data = $2`,
+          [username, JSON.stringify(data)]
+        );
+      }
+    } catch (e) { console.error('[DB] Failed to save users:', e.message); }
+  } else {
+    try {
+      ensureDataDir();
+      fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+    } catch (e) { console.error('[Persist] Failed to save users:', e.message); }
+  }
 }
 
-function saveProfiles() {
-  try {
-    ensureDataDir();
-    fs.writeFileSync(PROFILES_FILE, JSON.stringify(userProfiles, null, 2));
-  } catch (e) { console.error('[Persist] Failed to save profiles:', e.message); }
+async function saveProfiles() {
+  if (db) {
+    try {
+      for (const [userId, data] of Object.entries(userProfiles)) {
+        await db.query(
+          `INSERT INTO profiles (user_id, data) VALUES ($1, $2)
+           ON CONFLICT (user_id) DO UPDATE SET data = $2`,
+          [userId, JSON.stringify(data)]
+        );
+      }
+    } catch (e) { console.error('[DB] Failed to save profiles:', e.message); }
+  } else {
+    try {
+      ensureDataDir();
+      fs.writeFileSync(PROFILES_FILE, JSON.stringify(userProfiles, null, 2));
+    } catch (e) { console.error('[Persist] Failed to save profiles:', e.message); }
+  }
 }
 
-function loadPersistedData() {
-  try {
-    if (fs.existsSync(USERS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-      Object.assign(users, data);
-      console.log(`[Persist] Loaded ${Object.keys(data).length} user(s)`);
-    }
-  } catch (e) { console.error('[Persist] Failed to load users:', e.message); }
-  try {
-    if (fs.existsSync(PROFILES_FILE)) {
-      const data = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8'));
-      Object.assign(userProfiles, data);
-      console.log(`[Persist] Loaded ${Object.keys(data).length} profile(s)`);
-    }
-  } catch (e) { console.error('[Persist] Failed to load profiles:', e.message); }
+async function loadPersistedData() {
+  if (db) {
+    try {
+      const userRows = await db.query('SELECT username, data FROM users');
+      for (const row of userRows.rows) {
+        users[row.username] = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+      }
+      console.log(`[DB] Loaded ${userRows.rows.length} user(s)`);
+    } catch (e) { console.error('[DB] Failed to load users:', e.message); }
+    try {
+      const profileRows = await db.query('SELECT user_id, data FROM profiles');
+      for (const row of profileRows.rows) {
+        userProfiles[row.user_id] = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+      }
+      console.log(`[DB] Loaded ${profileRows.rows.length} profile(s)`);
+    } catch (e) { console.error('[DB] Failed to load profiles:', e.message); }
+  } else {
+    try {
+      if (fs.existsSync(USERS_FILE)) {
+        const data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+        Object.assign(users, data);
+        console.log(`[Persist] Loaded ${Object.keys(data).length} user(s)`);
+      }
+    } catch (e) { console.error('[Persist] Failed to load users:', e.message); }
+    try {
+      if (fs.existsSync(PROFILES_FILE)) {
+        const data = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8'));
+        Object.assign(userProfiles, data);
+        console.log(`[Persist] Loaded ${Object.keys(data).length} profile(s)`);
+      }
+    } catch (e) { console.error('[Persist] Failed to load profiles:', e.message); }
+  }
 }
 
-// Auto-create admin user from env vars (survives deploys even without persistent disk)
-function ensureAdminUser() {
+// Auto-create admin user from env vars (survives deploys)
+async function ensureAdminUser() {
   const adminUser = process.env.ADMIN_USER;
   const adminPass = process.env.ADMIN_PASS;
   if (adminUser && adminPass) {
-    if (!users[adminUser]) {
-      users[adminUser] = {
+    // Check if already exists (by username field)
+    const existingId = Object.keys(users).find(k => users[k].username === adminUser);
+    if (!existingId) {
+      const id = uuidv4();
+      users[id] = {
+        id,
+        username: adminUser,
         passwordHash: hashPassword(adminPass),
         createdAt: new Date().toISOString(),
         isAdmin: true,
       };
-      saveUsers();
+      await saveUsers();
       console.log(`[Auth] Auto-created admin user "${adminUser}" from env vars`);
     } else {
       console.log(`[Auth] Admin user "${adminUser}" already exists`);
@@ -143,7 +234,7 @@ function ensureAdminUser() {
   }
 }
 
-// Load on startup (called after userProfiles is defined below)
+// Startup init (called after userProfiles is defined below)
 
 // Auth middleware
 function authMiddleware(req, res, next) {
@@ -185,10 +276,12 @@ let nextCheckAt = null;
 // User profiles
 const userProfiles = {};
 
-// Load persisted users + profiles from disk
-loadPersistedData();
-// Auto-create admin user from ADMIN_USER/ADMIN_PASS env vars
-ensureAdminUser();
+// Initialize DB + load persisted data + create admin user
+(async () => {
+  await initDB();
+  await loadPersistedData();
+  await ensureAdminUser();
+})();
 
 // ─── Puppeteer setup ──────────────────────────────────────
 let puppeteerExtra, StealthPlugin;
@@ -1789,7 +1882,7 @@ app.post('/api/signup', (req, res) => {
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
 
   // Check if username taken
-  const existing = Object.values(users).find(u => u.username.toLowerCase() === username.toLowerCase());
+  const existing = Object.values(users).find(u => u.username && u.username.toLowerCase() === username.toLowerCase());
   if (existing) return res.status(400).json({ error: 'Username already taken' });
 
   const id = uuidv4();
@@ -1804,7 +1897,7 @@ app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
-  const user = Object.values(users).find(u => u.username.toLowerCase() === username.toLowerCase());
+  const user = Object.values(users).find(u => u.username && u.username.toLowerCase() === username.toLowerCase());
   if (!user || !verifyPassword(password, user.passwordHash)) {
     return res.status(401).json({ error: 'Invalid username or password' });
   }

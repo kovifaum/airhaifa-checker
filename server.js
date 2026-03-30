@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
@@ -83,6 +84,48 @@ function verifyToken(token) {
 // User store
 const users = {};
 
+// ─── Persistence (JSON file on disk) ─────────────────────
+const DATA_DIR = path.join(__dirname, 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
+
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function saveUsers() {
+  try {
+    ensureDataDir();
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  } catch (e) { console.error('[Persist] Failed to save users:', e.message); }
+}
+
+function saveProfiles() {
+  try {
+    ensureDataDir();
+    fs.writeFileSync(PROFILES_FILE, JSON.stringify(userProfiles, null, 2));
+  } catch (e) { console.error('[Persist] Failed to save profiles:', e.message); }
+}
+
+function loadPersistedData() {
+  try {
+    if (fs.existsSync(USERS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+      Object.assign(users, data);
+      console.log(`[Persist] Loaded ${Object.keys(data).length} user(s)`);
+    }
+  } catch (e) { console.error('[Persist] Failed to load users:', e.message); }
+  try {
+    if (fs.existsSync(PROFILES_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8'));
+      Object.assign(userProfiles, data);
+      console.log(`[Persist] Loaded ${Object.keys(data).length} profile(s)`);
+    }
+  } catch (e) { console.error('[Persist] Failed to load profiles:', e.message); }
+}
+
+// Load on startup (called after userProfiles is defined below)
+
 // Auth middleware
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -120,8 +163,11 @@ let checkInterval = null;
 let isChecking = false;
 let nextCheckAt = null;
 
-// User profiles (stored in memory for privacy - cleared on restart)
+// User profiles
 const userProfiles = {};
+
+// Load persisted users + profiles from disk
+loadPersistedData();
 
 // ─── Puppeteer setup ──────────────────────────────────────
 let puppeteerExtra, StealthPlugin;
@@ -1380,6 +1426,7 @@ app.post('/api/signup', (req, res) => {
   users[id] = { id, username, passwordHash: hashPassword(password), createdAt: new Date().toISOString() };
   const token = createToken(id);
   console.log(`[Auth] New user registered: ${username}`);
+  saveUsers();
   res.json({ success: true, token, username });
 });
 
@@ -1512,6 +1559,7 @@ app.post('/api/profiles', authMiddleware, (req, res) => {
     cardCvv: encrypt(cardCvv || null),
     createdAt: new Date().toISOString(),
   };
+  saveProfiles();
   res.json({ success: true, id, name: `${firstName} ${lastName}` });
 });
 
@@ -1531,6 +1579,7 @@ app.delete('/api/profiles/:id', authMiddleware, (req, res) => {
   if (!userProfiles[id]) return res.status(404).json({ error: 'Profile not found' });
   if (userProfiles[id].userId !== req.userId) return res.status(403).json({ error: 'Not your profile' });
   delete userProfiles[id];
+  saveProfiles();
   res.json({ success: true });
 });
 

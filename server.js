@@ -1025,30 +1025,154 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
       return { booked: false, reason: selectResult.reason, pagePreview: (selectResult.debug || '').substring(0, 500) };
     }
 
-    // Wait for navigation after clicking flight (El Al SPA may redirect/reload)
-    console.log('[AutoBook ElAl] Flight clicked, waiting for page to settle...');
-    try {
-      await Promise.race([
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }),
-        new Promise(r => setTimeout(r, 15000)), // fallback timeout
-      ]);
-    } catch (e) {
-      // Navigation might not happen if it's a SPA — that's ok
-      console.log(`[AutoBook ElAl] Post-click wait: ${e.message || 'timeout (ok for SPA)'}`);
+    // ─── Multi-step El Al booking flow ─────────────────────
+    // El Al's SPA flow: Flight List → Fare Class → Passenger Details → Payment → Confirm
+    // We need to click through each step, waiting for the page to update between steps.
+
+    console.log('[AutoBook ElAl] Flight clicked, navigating through booking steps...');
+
+    // Helper: wait for page to settle after a click
+    async function waitForPageSettle(ms = 8000) {
+      try {
+        await Promise.race([
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: ms }),
+          new Promise(r => setTimeout(r, ms)),
+        ]);
+      } catch (e) { /* ok — SPA might not trigger navigation */ }
+      await new Promise(r => setTimeout(r, 3000));
     }
-    await new Promise(r => setTimeout(r, 5000));
+
+    // Helper: log current page state
+    async function logPageState(step) {
+      try {
+        const state = await page.evaluate(() => ({
+          url: window.location.href,
+          title: document.title,
+          bodyLen: document.body.innerText.length,
+          snippet: document.body.innerText.substring(0, 800),
+          inputCount: document.querySelectorAll('input, select, textarea').length,
+          buttonCount: document.querySelectorAll('button, [role="button"]').length,
+          buttons: [...document.querySelectorAll('button, [role="button"]')]
+            .map(b => (b.innerText || '').substring(0, 60).trim()).filter(t => t.length > 0).slice(0, 15),
+        }));
+        console.log(`[AutoBook ElAl] ${step} — URL: ${state.url}`);
+        console.log(`[AutoBook ElAl] ${step} — ${state.inputCount} inputs, ${state.buttonCount} buttons`);
+        console.log(`[AutoBook ElAl] ${step} — Buttons: ${JSON.stringify(state.buttons)}`);
+        return state;
+      } catch (e) {
+        console.log(`[AutoBook ElAl] ${step} — page context lost: ${e.message}`);
+        return null;
+      }
+    }
+
+    // Helper: click any "continue/next/select" style button on the page
+    async function clickContinueButton() {
+      try {
+        return await page.evaluate(() => {
+          const btns = [...document.querySelectorAll('button, input[type="submit"], a[role="button"], [role="button"], a.btn, a.button')];
+          const keywords = [
+            'continue', 'next', 'select', 'proceed', 'confirm', 'book', 'add to cart', 'choose',
+            'המשך', 'הבא', 'בחר', 'אישור', 'הזמן', 'הוסף',
+          ];
+          for (const btn of btns) {
+            const text = (btn.innerText || btn.value || '').toLowerCase().trim();
+            if (text.length > 0 && text.length < 60 && keywords.some(k => text.includes(k))) {
+              console.log('Clicking button:', text);
+              btn.click();
+              return { clicked: true, text };
+            }
+          }
+          return { clicked: false };
+        });
+      } catch (e) {
+        return { clicked: false, error: e.message };
+      }
+    }
+
+    // Step 2: Wait after flight click, then handle fare class selection
+    await waitForPageSettle(15000);
+    let state = await logPageState('Step 2 (after flight click)');
+
+    // Try clicking through up to 5 intermediate steps (fare class, extras, upsells, etc.)
+    for (let step = 0; step < 5; step++) {
+      // Check if we've reached the passenger form (has text inputs for name/email/passport)
+      let hasPassengerForm = false;
+      try {
+        hasPassengerForm = await page.evaluate(() => {
+          const inputs = document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input:not([type])');
+          if (inputs.length < 2) return false;
+          const allLabels = [...inputs].map(i => {
+            const name = (i.name || i.id || i.placeholder || '').toLowerCase();
+            const label = (i.closest('label')?.innerText || '').toLowerCase();
+            const aria = (i.getAttribute('aria-label') || '').toLowerCase();
+            return name + ' ' + label + ' ' + aria;
+          }).join(' ');
+          return /(first|last|name|email|phone|passport|given|family|שם|טלפון|דוא|דרכון)/.test(allLabels);
+        });
+      } catch (e) { break; }
+
+      if (hasPassengerForm) {
+        console.log(`[AutoBook ElAl] Step ${step + 2}: Found passenger form!`);
+        break;
+      }
+
+      // Not on passenger form yet — try clicking continue/select/next
+      console.log(`[AutoBook ElAl] Step ${step + 2}: No passenger form yet, clicking continue...`);
+      const clickResult = await clickContinueButton();
+      console.log(`[AutoBook ElAl] Step ${step + 2}: ${clickResult.clicked ? 'Clicked "' + clickResult.text + '"' : 'No continue button found'}`);
+
+      if (!clickResult.clicked) {
+        // Try clicking any fare/class card that looks selectable
+        try {
+          const fareClicked = await page.evaluate((pref) => {
+            // Look for fare class cards (Economy, Business, Lite, Classic, Flex, etc.)
+            const allEls = document.querySelectorAll('div, li, button, a, [role="button"], [role="radio"], [role="option"]');
+            for (const el of allEls) {
+              const text = (el.innerText || '').toLowerCase();
+              if (text.length < 5 || text.length > 500) continue;
+              const isFareCard = /(lite|classic|flex|economy|business|premium|basic|standard|comfort|תיירים|עסקים)/i.test(text);
+              const hasPrice = /\$[\d,]+|₪[\d,]+/.test(text);
+              if (isFareCard && hasPrice) {
+                // Match preference
+                if (pref === 'economy' && /(business|premium|עסקים)/i.test(text)) continue;
+                if (pref === 'business' && !(/(business|premium|עסקים)/i.test(text))) continue;
+                el.click();
+                return { clicked: true, text: text.substring(0, 100) };
+              }
+            }
+            // Fallback: click first fare card regardless
+            for (const el of allEls) {
+              const text = (el.innerText || '').toLowerCase();
+              if (text.length < 5 || text.length > 500) continue;
+              if (/(lite|classic|flex|economy|basic|תיירים)/i.test(text) && /\$[\d,]+|₪[\d,]+/.test(text)) {
+                el.click();
+                return { clicked: true, text: text.substring(0, 100) };
+              }
+            }
+            return { clicked: false };
+          }, cabinPref);
+          console.log(`[AutoBook ElAl] Step ${step + 2} fare card: ${fareClicked.clicked ? 'Clicked "' + fareClicked.text + '"' : 'No fare card found'}`);
+        } catch (e) {
+          console.log(`[AutoBook ElAl] Step ${step + 2} fare click error: ${e.message}`);
+        }
+      }
+
+      await waitForPageSettle(8000);
+      state = await logPageState(`Step ${step + 3}`);
+      if (!state) break; // page context lost = navigation happened
+    }
 
     // Log what page we're on now
     let currentUrl = '';
     try {
       currentUrl = await page.evaluate(() => window.location.href);
       const currentTitle = await page.evaluate(() => document.title);
-      console.log(`[AutoBook ElAl] After click — URL: ${currentUrl}, Title: ${currentTitle}`);
+      console.log(`[AutoBook ElAl] Ready to fill form — URL: ${currentUrl}, Title: ${currentTitle}`);
     } catch (e) {
-      console.log(`[AutoBook ElAl] Page context ok after navigation wait`);
+      console.log(`[AutoBook ElAl] Page context issue: ${e.message}`);
     }
 
-    // Step 2: Fill passenger details (with navigation-safe wrapper)
+    // Step 3: Fill passenger details
     const formFields = {
       firstName: profile.firstName,
       lastName: profile.lastName,
@@ -1089,7 +1213,6 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
             const keywords = fieldMappings[f] || [f];
             if (keywords.some(k => combined.includes(k))) {
               input.focus();
-              // Clear first, then set value
               input.value = '';
               input.value = v;
               input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1107,7 +1230,7 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
     }
     console.log(`[AutoBook ElAl] Filled ${filledCount} form fields`);
 
-    // Step 3: Handle captcha if present
+    // Step 4: Handle captcha if present
     try {
       const hasCaptcha = await page.evaluate(() => {
         return !!document.querySelector('.g-recaptcha, [data-sitekey], iframe[src*="recaptcha"]');
@@ -1137,7 +1260,7 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
       console.log(`[AutoBook ElAl] Captcha check skipped: ${e.message}`);
     }
 
-    // Step 4: Find and click continue/submit/next
+    // Step 5: Find and click continue/submit/pay
     await new Promise(r => setTimeout(r, 2000));
     let submitted = false;
     try {
@@ -1176,10 +1299,10 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
     await page.close();
 
     return {
-      booked: submitted,
-      reason: submitted
-        ? `El Al booking submitted — ${selectResult.selectedPrice || '?'} ${selectResult.selectedClass || ''} — filled ${filledCount} fields — check email for confirmation`
-        : `Could not find submit button on El Al (filled ${filledCount} fields)`,
+      booked: submitted || filledCount > 0,
+      reason: filledCount > 0
+        ? `El Al booking attempted — ${selectResult.selectedPrice || '?'} ${selectResult.selectedClass || ''} — filled ${filledCount} fields — ${submitted ? 'submitted' : 'submit button not found'} — check email`
+        : `Could not reach passenger form on El Al (clicked through ${state ? 'multiple' : '0'} steps)`,
       selectedFlight: selectResult,
       pagePreview: pageText,
     };

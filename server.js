@@ -1219,7 +1219,7 @@ app.get('/api/status', (req, res) => {
 
 // Add watch
 app.post('/api/watches', (req, res) => {
-  const { airline, url, origin, destination, date, passengers, email, vtext, maxPrice, autoBook, profileId } = req.body;
+  const { airline, url, origin, destination, date, passengers, email, vtext, maxPrice, autoBook, profileId, cabinClass } = req.body;
 
   if (airline === 'airhaifa' && !url && (!origin || !destination || !date)) return res.status(400).json({ error: 'Either a URL or origin/destination/date is required for Air Haifa' });
   if (airline === 'elal' && (!origin || !destination || !date)) return res.status(400).json({ error: 'Origin, destination, and date are required for El Al' });
@@ -1239,6 +1239,7 @@ app.post('/api/watches', (req, res) => {
     vtext: vtext || null,
     autoBook: !!autoBook,
     profileId: profileId || null,
+    cabinClass: cabinClass || 'economy',
     status: 'pending',
     available: null,
     freeSeats: null,

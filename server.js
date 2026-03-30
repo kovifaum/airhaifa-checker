@@ -257,7 +257,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Config ───────────────────────────────────────────────
-const CHECK_INTERVAL_MS = parseInt(process.env.CHECK_INTERVAL_MS || '30000'); // 30 seconds
+const CHECK_INTERVAL_MS = parseInt(process.env.CHECK_INTERVAL_MS || '120000'); // 2 minutes (30s was too aggressive, triggered Google CAPTCHA)
 const TWOCAPTCHA_KEY = process.env.TWOCAPTCHA_KEY || '';
 
 // BrightData proxy config (for bypassing airline bot protection)
@@ -691,124 +691,89 @@ async function checkElAlDirect(origin, destination, date, passengers, bookingUrl
   }
 }
 
-// ─── Flight data via Amadeus API (reliable, no scraping) ─────
-async function checkFlightsViaAPI(origin, destination, date, passengers, bookingUrl) {
-  const AMADEUS_KEY = process.env.AMADEUS_API_KEY;
-  const AMADEUS_SECRET = process.env.AMADEUS_API_SECRET;
+// ─── Persistent Google Flights session ───────────────────
+// Reuse a single browser page with warmed-up cookies to avoid CAPTCHA
+let gfPage = null;
+let gfSessionWarmed = false;
 
-  if (!AMADEUS_KEY || !AMADEUS_SECRET) {
-    console.log('[API] No Amadeus credentials, skipping API check');
-    return null;
-  }
+async function warmGoogleSession() {
+  if (gfSessionWarmed && gfPage && !gfPage.isClosed()) return gfPage;
 
+  const br = await getBrowser();
+  gfPage = await br.newPage();
+  await gfPage.setViewport({ width: 1366, height: 768 });
+  await gfPage.setExtraHTTPHeaders({
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  });
+
+  // Warm up: visit google.com first to get cookies + establish session
   try {
-    const fetch = (await import('node-fetch')).default;
+    console.log('[GF] Warming up Google session...');
+    await gfPage.goto('https://www.google.com/?hl=en', { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2000));
 
-    // Get Amadeus OAuth token
-    console.log('[API] Authenticating with Amadeus...');
-    const tokenRes = await fetch('https://api.amadeus.com/v1/security/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `grant_type=client_credentials&client_id=${AMADEUS_KEY}&client_secret=${AMADEUS_SECRET}`,
+    // Accept cookies if consent banner appears
+    await gfPage.evaluate(() => {
+      // Google consent buttons
+      const btns = [...document.querySelectorAll('button')];
+      const acceptBtn = btns.find(b => {
+        const t = (b.innerText || '').toLowerCase();
+        return t.includes('accept all') || t.includes('i agree') || t.includes('accept');
+      });
+      if (acceptBtn) acceptBtn.click();
     });
-    const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) {
-      console.log('[API] Amadeus auth failed:', JSON.stringify(tokenData));
-      return null;
-    }
+    await new Promise(r => setTimeout(r, 1000));
 
-    // Search flights
-    const searchUrl = `https://api.amadeus.com/v2/shopping/flight-offers?originLocationCode=${origin}&destinationLocationCode=${destination}&departureDate=${date}&adults=${passengers}&nonStop=false&max=20&currencyCode=USD`;
-    console.log(`[API] Searching flights: ${origin}→${destination} on ${date}`);
-    const flightRes = await fetch(searchUrl, {
-      headers: { 'Authorization': `Bearer ${tokenData.access_token}` },
-    });
-    const flightData = await flightRes.json();
-
-    if (!flightData.data || flightData.data.length === 0) {
-      console.log('[API] No flights found via Amadeus');
-      return { available: false, freeSeats: 0, flights: [], reason: 'no_flights', source: 'amadeus_api' };
-    }
-
-    const flights = flightData.data.map((offer, i) => {
-      const seg = offer.itineraries[0]?.segments[0];
-      const lastSeg = offer.itineraries[0]?.segments[offer.itineraries[0].segments.length - 1];
-      const stops = (offer.itineraries[0]?.segments.length || 1) - 1;
-      return {
-        airline: seg?.carrierCode || 'Unknown',
-        flightNum: seg ? `${seg.carrierCode}${seg.number}` : `FL${i + 1}`,
-        from: seg?.departure?.iataCode || origin,
-        to: lastSeg?.arrival?.iataCode || destination,
-        departure: seg?.departure?.at || date,
-        arrival: lastSeg?.arrival?.at || '',
-        className: offer.travelerPricings?.[0]?.fareDetailsBySegment?.[0]?.cabin || 'ECONOMY',
-        freeSeats: offer.numberOfBookableSeats || 1,
-        price: '$' + offer.price?.total,
-        currency: offer.price?.currency || 'USD',
-        stops: stops === 0 ? 'Nonstop' : `${stops} stop`,
-        duration: offer.itineraries[0]?.duration?.replace('PT', '').toLowerCase() || '',
-        bookingUrl: bookingUrl,
-        source: 'amadeus_api',
-      };
-    });
-
-    console.log(`[API] Amadeus found ${flights.length} flight(s)`);
-    return {
-      available: true,
-      freeSeats: flights.reduce((s, f) => s + (f.freeSeats || 0), 0),
-      flights,
-      reason: 'seats_available',
-      source: 'amadeus_api',
-    };
+    console.log('[GF] Session warmed up, cookies set');
+    gfSessionWarmed = true;
   } catch (e) {
-    console.log(`[API] Amadeus error: ${e.message}`);
-    return null;
+    console.log(`[GF] Session warmup failed: ${e.message}`);
   }
+
+  return gfPage;
 }
 
 // ─── Google Flights fallback for El Al ───────────────────
 async function checkElAlGoogleFlights(origin, destination, date, passengers, bookingUrl) {
-  // Strategy: Try Amadeus API first (reliable), then Google Flights scraping as fallback
-  const apiResult = await checkFlightsViaAPI(origin, destination, date, passengers, bookingUrl);
-  if (apiResult) return apiResult;
-
-  // Google Flights scraping — use DIRECT (no proxy, BrightData blocks Google)
-  const br = await getBrowser();
-  const page = await br.newPage();
-  await page.setViewport({ width: 1366, height: 768 });
-
-  await page.setExtraHTTPHeaders({
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  });
+  // Use warmed-up persistent session to avoid CAPTCHA
+  let page;
+  try {
+    page = await warmGoogleSession();
+  } catch (e) {
+    // If session warmup fails, create a fresh page
+    const br = await getBrowser();
+    page = await br.newPage();
+    await page.setViewport({ width: 1366, height: 768 });
+  }
 
   const gfQuery = `Flights from ${origin} to ${destination} on ${date} one way ${passengers} passenger`;
   const searchUrl = `https://www.google.com/travel/flights?q=${encodeURIComponent(gfQuery)}&hl=en`;
 
   try {
-    console.log(`[GF] Google Flights scraping: ${searchUrl}`);
+    console.log(`[GF] Google Flights (session-based): ${searchUrl}`);
     await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 });
     await new Promise(r => setTimeout(r, 8000));
 
-    // Debug
+    // Check for CAPTCHA
     const debugInfo = await page.evaluate(() => {
       const body = document.body;
       if (!body) return { error: 'no body' };
       const text = body.innerText || '';
       return {
         title: document.title,
-        hasCaptcha: text.includes('unusual traffic') || text.includes('not a robot'),
+        hasCaptcha: text.includes('unusual traffic') || text.includes('not a robot') || text.includes('Webpage not available'),
         priceCount: (text.match(/\$[\d,]+/g) || []).length,
         preview: text.substring(0, 200),
       };
     });
-    console.log(`[GF] Debug: title="${debugInfo.title}" captcha=${debugInfo.hasCaptcha} prices=${debugInfo.priceCount}`);
+    console.log(`[GF] title="${debugInfo.title}" captcha=${debugInfo.hasCaptcha} prices=${debugInfo.priceCount}`);
 
-    // If Google shows CAPTCHA, don't waste time parsing
     if (debugInfo.hasCaptcha) {
-      console.log(`[GF] Google CAPTCHA detected — scraping not possible from this IP`);
-      await page.close();
-      // Return a special result so the checker knows scraping is broken
+      console.log(`[GF] CAPTCHA detected — invalidating session, will retry next cycle`);
+      gfSessionWarmed = false; // force re-warmup next time
+      try { if (page !== gfPage) await page.close(); } catch (_) {}
+      gfPage = null;
       return { available: false, freeSeats: 0, flights: [], reason: 'google_captcha', source: 'google_flights' };
     }
 
@@ -816,7 +781,7 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
       const results = [];
       const seen = new Set();
 
-      // Try known Google Flights selectors
+      // Strategy 1: known Google Flights selectors
       const knownSelectors = ['li.pIav2d', 'li[data-ved]', '[role="listitem"]'];
       let cards = [];
       for (const sel of knownSelectors) {
@@ -827,7 +792,7 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
         }
       }
 
-      // Fallback: scan all elements
+      // Strategy 2: broad scan for flight-like elements
       if (cards.length === 0) {
         const allEls = document.querySelectorAll('div, li, article, section');
         for (const el of allEls) {
@@ -876,7 +841,7 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
       return results;
     });
 
-    await page.close();
+    // DON'T close the page — reuse it next time
     console.log(`[GF] Parsed ${pageFlights.length} flight(s)`);
 
     if (pageFlights.length > 0 && pageFlights[0]?.noFlights) {
@@ -911,7 +876,9 @@ async function checkElAlGoogleFlights(origin, destination, date, passengers, boo
       })),
     };
   } catch (e) {
-    try { await page.close(); } catch (_) {}
+    // On error, invalidate session so it re-warms next time
+    gfSessionWarmed = false;
+    gfPage = null;
     throw e;
   }
 }

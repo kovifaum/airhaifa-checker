@@ -551,10 +551,12 @@ async function attemptAutoBook(watch, flightResult) {
 
   console.log(`[AutoBook] Attempting to book for ${profile.firstName} ${profile.lastName}...`);
 
-  if (watch.airline !== 'airhaifa') {
-    return { booked: false, reason: 'Auto-book currently only supports Air Haifa' };
+  // Route to airline-specific booker
+  if (watch.airline === 'elal') {
+    return await attemptAutoBookElAl(watch, flightResult, profile);
   }
 
+  // Air Haifa booking
   const br = await getBrowser();
   const page = await br.newPage();
   await page.setViewport({ width: 1366, height: 768 });
@@ -688,6 +690,275 @@ async function attemptAutoBook(watch, flightResult) {
   } catch (e) {
     try { await page.close(); } catch (_) {}
     return { booked: false, reason: 'Error: ' + e.message };
+  }
+}
+
+// ─── El Al auto-booking via BrightData proxy ────────────
+async function attemptAutoBookElAl(watch, flightResult, profile) {
+  if (!hasBrightData) {
+    return { booked: false, reason: 'BrightData proxy required for El Al auto-booking' };
+  }
+
+  const cabinPref = (watch.cabinClass || 'economy').toLowerCase();
+  const maxPrice = watch.maxPrice ? parseFloat(watch.maxPrice) : null;
+
+  // Pick the best flight from results based on preference
+  let targetFlight = null;
+  if (flightResult.flights && flightResult.flights.length > 0) {
+    const sorted = [...flightResult.flights].sort((a, b) => {
+      const priceA = parseFloat(String(a.price || '0').replace(/[^0-9.]/g, ''));
+      const priceB = parseFloat(String(b.price || '0').replace(/[^0-9.]/g, ''));
+      return priceA - priceB; // cheapest first
+    });
+
+    if (cabinPref === 'economy') {
+      // Pick cheapest flight (economy is usually cheapest)
+      targetFlight = sorted[0];
+    } else if (cabinPref === 'business') {
+      // Pick a business class flight (usually more expensive)
+      targetFlight = sorted.find(f => {
+        const cls = (f.className || '').toLowerCase();
+        return cls.includes('business') || cls.includes('מחלקת עסקים');
+      }) || sorted[sorted.length - 1]; // fallback to most expensive
+    } else {
+      targetFlight = sorted[0]; // any = cheapest
+    }
+  }
+
+  const targetPrice = targetFlight ? String(targetFlight.price || '').replace(/[^0-9.]/g, '') : null;
+  console.log(`[AutoBook ElAl] Target: ${cabinPref} class, price ${targetFlight?.price || 'unknown'}`);
+
+  const br = await getProxyBrowser();
+  const page = await br.newPage();
+  await page.setViewport({ width: 1366, height: 768 });
+
+  await page.authenticate({
+    username: BRIGHTDATA_USER,
+    password: BRIGHTDATA_PASS,
+  });
+
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'en-US,en;q=0.9',
+  });
+
+  const bookingUrl = `https://www.elal.com/en/booking/flight-select/?isOneWay=true&origin=${watch.origin}&destination=${watch.destination}&dep=${watch.date}&adult=${watch.passengers || 1}`;
+
+  try {
+    console.log(`[AutoBook ElAl] Navigating to: ${bookingUrl}`);
+    await page.goto(bookingUrl, { waitUntil: 'networkidle2', timeout: 90000 });
+
+    // Check if blocked
+    const title = await page.title();
+    if (title.toLowerCase().includes('access denied')) {
+      await page.close();
+      return { booked: false, reason: 'El Al blocked access even with proxy' };
+    }
+
+    await new Promise(r => setTimeout(r, 10000));
+
+    // Step 1: Find and click the right flight based on cabin class and price
+    const selectResult = await page.evaluate((pref, tPrice, mPrice) => {
+      const allElements = document.querySelectorAll('div, li, article, section, button, a, [role="button"]');
+      const candidates = [];
+
+      for (const el of allElements) {
+        const text = el.innerText || '';
+        if (text.length < 10 || text.length > 3000) continue;
+
+        const hasPrice = /\$[\d,]+|₪[\d,]+/.test(text);
+        const hasSelect = /(select|book|choose|בחר|הזמן)/i.test(text);
+        const isEconomy = /(economy|תיירים|coach)/i.test(text);
+        const isBusiness = /(business|עסקים|premium)/i.test(text);
+
+        if (hasPrice || hasSelect) {
+          const priceMatch = text.match(/\$[\d,]+/);
+          const priceNum = priceMatch ? parseFloat(priceMatch[0].replace(/[^0-9.]/g, '')) : null;
+
+          candidates.push({
+            el,
+            text: text.substring(0, 300),
+            price: priceNum,
+            priceStr: priceMatch ? priceMatch[0] : null,
+            isEconomy,
+            isBusiness,
+            hasSelect,
+          });
+        }
+      }
+
+      if (candidates.length === 0) return { clicked: false, reason: 'No flight options found on page' };
+
+      // Filter by cabin preference
+      let filtered = candidates;
+      if (pref === 'economy') {
+        const econOnly = candidates.filter(c => c.isEconomy && !c.isBusiness);
+        if (econOnly.length > 0) filtered = econOnly;
+        // Sort by price ascending
+        filtered.sort((a, b) => (a.price || 99999) - (b.price || 99999));
+      } else if (pref === 'business') {
+        const bizOnly = candidates.filter(c => c.isBusiness);
+        if (bizOnly.length > 0) filtered = bizOnly;
+        filtered.sort((a, b) => (a.price || 99999) - (b.price || 99999));
+      } else {
+        filtered.sort((a, b) => (a.price || 99999) - (b.price || 99999));
+      }
+
+      // Apply max price filter
+      if (mPrice) {
+        filtered = filtered.filter(c => !c.price || c.price <= mPrice);
+      }
+
+      if (filtered.length === 0) return { clicked: false, reason: 'No flights match price/class criteria' };
+
+      const target = filtered[0];
+
+      // Try to click select/book button within or near this element
+      const selectBtn = target.el.querySelector('button, a, [role="button"]') ||
+        target.el.closest('[role="button"]') || target.el;
+
+      // Also look for explicit select buttons
+      const btns = target.el.querySelectorAll('button, a, [role="button"]');
+      let clicked = false;
+      for (const btn of btns) {
+        const btnText = (btn.innerText || '').toLowerCase();
+        if (btnText.includes('select') || btnText.includes('book') || btnText.includes('בחר') || btnText.includes('הזמן')) {
+          btn.click();
+          clicked = true;
+          break;
+        }
+      }
+
+      if (!clicked) {
+        // Click the element itself
+        selectBtn.click();
+        clicked = true;
+      }
+
+      return {
+        clicked,
+        selectedPrice: target.priceStr,
+        selectedClass: target.isEconomy ? 'Economy' : target.isBusiness ? 'Business' : 'Unknown',
+        reason: `Selected ${target.priceStr || 'unknown price'} ${target.isEconomy ? 'Economy' : target.isBusiness ? 'Business' : ''} flight`,
+      };
+    }, cabinPref, targetPrice, maxPrice);
+
+    console.log(`[AutoBook ElAl] Flight selection: ${JSON.stringify(selectResult)}`);
+
+    if (!selectResult.clicked) {
+      await page.close();
+      return { booked: false, reason: selectResult.reason };
+    }
+
+    await new Promise(r => setTimeout(r, 5000));
+
+    // Step 2: Fill passenger details
+    const formFields = {
+      firstName: profile.firstName,
+      lastName: profile.lastName,
+      email: profile.email,
+      phone: profile.phone,
+      passport: profile.passport,
+      dob: profile.dob,
+      cardNumber: profile.cardNumber,
+      cardExp: profile.cardExp,
+      cardCvv: profile.cardCvv,
+    };
+
+    for (const [field, value] of Object.entries(formFields)) {
+      if (!value) continue;
+      try {
+        await page.evaluate((f, v) => {
+          const inputs = document.querySelectorAll('input, select');
+          for (const input of inputs) {
+            const name = (input.name || input.id || input.placeholder || '').toLowerCase();
+            const label = input.closest('label')?.innerText?.toLowerCase() || '';
+            const ariaLabel = (input.getAttribute('aria-label') || '').toLowerCase();
+            const combined = name + ' ' + label + ' ' + ariaLabel;
+
+            const fieldMappings = {
+              firstName: ['first', 'fname', 'given', 'שם פרטי'],
+              lastName: ['last', 'lname', 'surname', 'family', 'שם משפחה'],
+              email: ['email', 'mail', 'דוא"ל', 'אימייל'],
+              phone: ['phone', 'tel', 'mobile', 'טלפון', 'נייד'],
+              passport: ['passport', 'id', 'document', 'דרכון', 'תעודת זהות'],
+              dob: ['birth', 'dob', 'date of birth', 'תאריך לידה'],
+              cardNumber: ['card', 'credit', 'cc', 'כרטיס אשראי', 'מספר כרטיס'],
+              cardExp: ['expir', 'exp', 'valid', 'תוקף'],
+              cardCvv: ['cvv', 'cvc', 'security', 'csv'],
+            };
+
+            const keywords = fieldMappings[f] || [f];
+            if (keywords.some(k => combined.includes(k))) {
+              input.focus();
+              input.value = v;
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              input.dispatchEvent(new Event('blur', { bubbles: true }));
+              break;
+            }
+          }
+        }, field, value);
+      } catch (e) {
+        console.log(`[AutoBook ElAl] Could not fill ${field}: ${e.message}`);
+      }
+    }
+
+    // Step 3: Handle captcha if present
+    const hasCaptcha = await page.evaluate(() => {
+      return !!document.querySelector('.g-recaptcha, [data-sitekey], iframe[src*="recaptcha"]');
+    });
+
+    if (hasCaptcha && TWOCAPTCHA_KEY) {
+      const siteKey = await page.evaluate(() => {
+        const el = document.querySelector('.g-recaptcha, [data-sitekey]');
+        return el ? el.getAttribute('data-sitekey') : null;
+      });
+      if (siteKey) {
+        try {
+          console.log('[AutoBook ElAl] Solving captcha...');
+          const token = await solveCaptcha(siteKey, bookingUrl);
+          await page.evaluate((t) => {
+            const ta = document.querySelector('#g-recaptcha-response, [name="g-recaptcha-response"]');
+            if (ta) { ta.value = t; ta.dispatchEvent(new Event('change', { bubbles: true })); }
+            if (typeof window.captchaCallback === 'function') window.captchaCallback(t);
+            if (typeof window.onCaptchaSuccess === 'function') window.onCaptchaSuccess(t);
+          }, token);
+        } catch (e) {
+          console.log(`[AutoBook ElAl] Captcha solve failed: ${e.message}`);
+        }
+      }
+    }
+
+    // Step 4: Find and click continue/submit/next
+    await new Promise(r => setTimeout(r, 2000));
+    const submitted = await page.evaluate(() => {
+      const btns = [...document.querySelectorAll('button, input[type="submit"], a')];
+      const submitBtn = btns.find(b => {
+        const text = (b.innerText || b.value || '').toLowerCase();
+        return text.includes('continue') || text.includes('submit') || text.includes('next') ||
+               text.includes('proceed') || text.includes('confirm') ||
+               text.includes('המשך') || text.includes('שלח') || text.includes('אישור');
+      });
+      if (submitBtn) { submitBtn.click(); return true; }
+      return false;
+    });
+
+    await new Promise(r => setTimeout(r, 5000));
+
+    const pageText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+    await page.close();
+
+    return {
+      booked: submitted,
+      reason: submitted
+        ? `El Al booking submitted — ${selectResult.selectedPrice || '?'} ${selectResult.selectedClass || ''} — check email for confirmation`
+        : 'Could not find submit button on El Al',
+      selectedFlight: selectResult,
+      pagePreview: pageText,
+    };
+  } catch (e) {
+    try { await page.close(); } catch (_) {}
+    return { booked: false, reason: 'El Al booking error: ' + e.message };
   }
 }
 

@@ -378,6 +378,15 @@
             <div class="form-hint">10-digit Verizon number for SMS alerts</div>
           </div>
           <div class="form-group">
+            <label>Cabin Class Preference</label>
+            <select id="cabinClassSelect">
+              <option value="economy">Economy (cheapest)</option>
+              <option value="business">Business</option>
+              <option value="any">Any (first available)</option>
+            </select>
+            <div class="form-hint">Which class to book if auto-booking</div>
+          </div>
+          <div class="form-group">
             <label>Auto-book Profile</label>
             <select id="profileSelect">
               <option value="">Notify only (no auto-book)</option>
@@ -618,6 +627,7 @@
         passengers: parseInt(document.getElementById('passengersInput').value) || 1,
         profileId: document.getElementById('profileSelect').value || null,
         autoBook: document.getElementById('autoBookToggle').checked,
+        cabinClass: document.getElementById('cabinClassSelect').value || 'economy',
       };
 
       // Both airlines use route + date

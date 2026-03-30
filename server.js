@@ -1040,19 +1040,36 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
   }
 
   try {
-    // ─── STEP 1: Navigate to El Al homepage ─────────────────
-    console.log('[AutoBook ElAl] Step 1: Loading El Al homepage...');
-    await page.goto('https://www.elal.com/eng/usa', { waitUntil: 'networkidle2', timeout: 90000 });
-    await new Promise(r => setTimeout(r, 5000));
+    // ─── STEP 1: Go directly to booking.elal.com ────────────
+    // The main www.elal.com has heavy Akamai protection that blocks bots.
+    // booking.elal.com is a separate Angular SPA with lighter protection.
+    // We use their internal search API to trigger a flight search.
+    const bookingUrl = `https://booking.elal.com/booking/flights?market=US&lang=en&isOW=true&origin=${watch.origin}&destination=${watch.destination}&dep=${watch.date}&ADT=${passengers}`;
+    console.log(`[AutoBook ElAl] Step 1: Loading booking.elal.com — ${bookingUrl}`);
+    await page.goto(bookingUrl, { waitUntil: 'networkidle2', timeout: 90000 });
+    await new Promise(r => setTimeout(r, 8000));
 
-    // Check if blocked
-    const title = await page.title();
-    const bodyLen = await page.evaluate(() => document.body.innerText.length);
-    console.log(`[AutoBook ElAl] Homepage loaded — title: "${title}", body: ${bodyLen} chars`);
+    // Check if blocked or empty
+    let title = '';
+    let bodyLen = 0;
+    try {
+      title = await page.title();
+      bodyLen = await page.evaluate(() => document.body.innerText.length);
+    } catch (e) {}
+    console.log(`[AutoBook ElAl] Page loaded — title: "${title}", body: ${bodyLen} chars`);
 
-    if (title.toLowerCase().includes('access denied') || bodyLen < 200) {
+    if (title.toLowerCase().includes('access denied') || title.toLowerCase().includes('blocked')) {
+      // Fallback: try booking.elal.com without params
+      console.log('[AutoBook ElAl] Blocked with params, trying base booking URL...');
+      await page.goto('https://booking.elal.com/booking/flights?market=US&lang=en', { waitUntil: 'networkidle2', timeout: 60000 });
+      await new Promise(r => setTimeout(r, 5000));
+      title = await page.title().catch(() => '');
+      bodyLen = await page.evaluate(() => document.body.innerText.length).catch(() => 0);
+    }
+
+    if (title.toLowerCase().includes('access denied') || bodyLen < 100) {
       await page.close();
-      return { booked: false, reason: 'El Al blocked access even with proxy' };
+      return { booked: false, reason: 'El Al booking site blocked access even with proxy' };
     }
 
     // Dismiss cookie banner if present
@@ -1065,241 +1082,67 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
       await new Promise(r => setTimeout(r, 1000));
     } catch (e) { /* ok */ }
 
-    // ─── STEP 2: Set to "One Way" trip ──────────────────────
-    console.log('[AutoBook ElAl] Step 2: Setting One Way trip...');
-    try {
-      await page.evaluate(() => {
-        // Look for One Way radio/button/tab
-        const allEls = document.querySelectorAll('button, label, div, span, a, [role="tab"], [role="radio"]');
-        for (const el of allEls) {
-          const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-          if (text === 'one way' || text === 'one-way' || text === 'oneway') {
-            el.click();
-            return true;
-          }
-        }
-        return false;
-      });
-      await new Promise(r => setTimeout(r, 1500));
-    } catch (e) {
-      console.log(`[AutoBook ElAl] Could not set One Way: ${e.message}`);
-    }
-
-    // ─── STEP 3: Fill origin airport ────────────────────────
-    console.log(`[AutoBook ElAl] Step 3: Filling origin — "${originCity}"...`);
-    try {
-      // Click origin field and type city name
-      const originFilled = await page.evaluate(() => {
-        // Find origin input — look for "from", "origin", "departure" fields
-        const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
-        for (const inp of inputs) {
-          const ph = (inp.placeholder || '').toLowerCase();
-          const name = (inp.name || inp.id || '').toLowerCase();
-          const label = (inp.closest('label')?.innerText || '').toLowerCase();
-          const aria = (inp.getAttribute('aria-label') || '').toLowerCase();
-          const combined = ph + ' ' + name + ' ' + label + ' ' + aria;
-          if (/(from|origin|depart|where.*from|מאיפה|מוצא|יציאה)/i.test(combined)) {
-            inp.click();
-            inp.focus();
-            return inp.id || inp.name || 'found';
-          }
-        }
-        return null;
-      });
-      console.log(`[AutoBook ElAl] Origin field: ${originFilled || 'not found'}`);
-
-      if (originFilled) {
-        // Type the city name to trigger autocomplete
-        await page.keyboard.type(originCity, { delay: 100 });
-        await new Promise(r => setTimeout(r, 2000));
-
-        // Click first autocomplete result
-        await page.evaluate((city) => {
-          const items = document.querySelectorAll('[role="option"], [role="listbox"] li, .autocomplete-item, .search-result, .dropdown-item, li[class*="option"], div[class*="option"], .suggestion, mat-option');
-          for (const item of items) {
-            const text = (item.innerText || item.textContent || '').toLowerCase();
-            if (text.includes(city.toLowerCase())) {
-              item.click();
-              return true;
-            }
-          }
-          // Fallback: click first visible option
-          if (items.length > 0) {
-            items[0].click();
-            return true;
-          }
-          return false;
-        }, originCity);
-        await new Promise(r => setTimeout(r, 1500));
-      }
-    } catch (e) {
-      console.log(`[AutoBook ElAl] Origin fill error: ${e.message}`);
-    }
-
-    // ─── STEP 4: Fill destination airport ───────────────────
-    console.log(`[AutoBook ElAl] Step 4: Filling destination — "${destCity}"...`);
-    try {
-      const destFilled = await page.evaluate(() => {
-        const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
-        for (const inp of inputs) {
-          const ph = (inp.placeholder || '').toLowerCase();
-          const name = (inp.name || inp.id || '').toLowerCase();
-          const label = (inp.closest('label')?.innerText || '').toLowerCase();
-          const aria = (inp.getAttribute('aria-label') || '').toLowerCase();
-          const combined = ph + ' ' + name + ' ' + label + ' ' + aria;
-          if (/(to|dest|arrival|where.*to|לאן|יעד|הגעה)/i.test(combined)) {
-            inp.click();
-            inp.focus();
-            return inp.id || inp.name || 'found';
-          }
-        }
-        return null;
-      });
-      console.log(`[AutoBook ElAl] Destination field: ${destFilled || 'not found'}`);
-
-      if (destFilled) {
-        await page.keyboard.type(destCity, { delay: 100 });
-        await new Promise(r => setTimeout(r, 2000));
-
-        await page.evaluate((city) => {
-          const items = document.querySelectorAll('[role="option"], [role="listbox"] li, .autocomplete-item, .search-result, .dropdown-item, li[class*="option"], div[class*="option"], .suggestion, mat-option');
-          for (const item of items) {
-            const text = (item.innerText || item.textContent || '').toLowerCase();
-            if (text.includes(city.toLowerCase())) {
-              item.click();
-              return true;
-            }
-          }
-          if (items.length > 0) {
-            items[0].click();
-            return true;
-          }
-          return false;
-        }, destCity);
-        await new Promise(r => setTimeout(r, 1500));
-      }
-    } catch (e) {
-      console.log(`[AutoBook ElAl] Destination fill error: ${e.message}`);
-    }
-
-    // ─── STEP 5: Set departure date ─────────────────────────
-    console.log(`[AutoBook ElAl] Step 5: Setting date — ${watch.date}...`);
-    try {
-      // Click date picker
-      await page.evaluate(() => {
-        const dateInputs = document.querySelectorAll('input[type="text"], input[type="date"], [class*="date"], [class*="calendar"], button[class*="date"]');
-        for (const el of dateInputs) {
-          const text = (el.placeholder || el.innerText || el.getAttribute('aria-label') || '').toLowerCase();
-          const name = (el.name || el.id || el.className || '').toLowerCase();
-          if (/(date|depart|when|תאריך|יציאה)/i.test(text + ' ' + name)) {
-            el.click();
-            return true;
-          }
-        }
-        return false;
-      });
-      await new Promise(r => setTimeout(r, 2000));
-
-      // Parse the target date
-      const [year, month, day] = watch.date.split('-').map(Number);
-      const targetDate = new Date(year, month - 1, day);
-      const targetMonth = targetDate.toLocaleString('en-US', { month: 'long' });
-      const targetYear = targetDate.getFullYear();
-
-      // Navigate calendar to the right month (click next up to 12 times)
-      for (let i = 0; i < 12; i++) {
-        const calendarMonth = await page.evaluate(() => {
-          const headers = document.querySelectorAll('[class*="calendar"] [class*="header"], [class*="calendar"] [class*="title"], [class*="month"], .datepicker-header, .calendar-title');
-          for (const h of headers) {
-            const text = (h.innerText || h.textContent || '').trim();
-            if (text.length > 3 && text.length < 40) return text;
-          }
-          return '';
-        });
-        console.log(`[AutoBook ElAl] Calendar shows: "${calendarMonth}"`);
-
-        if (calendarMonth.includes(targetMonth) && calendarMonth.includes(String(targetYear))) {
-          break; // We're on the right month
-        }
-
-        // Click next month arrow
-        await page.evaluate(() => {
-          const nextBtns = document.querySelectorAll('button[class*="next"], [class*="calendar"] button[aria-label*="next"], [class*="calendar"] button[aria-label*="Next"], [class*="right-arrow"], .calendar-next, button[class*="forward"]');
-          if (nextBtns.length > 0) nextBtns[0].click();
-          else {
-            // Fallback: find arrow-looking buttons
-            const allBtns = document.querySelectorAll('[class*="calendar"] button, .datepicker button');
-            for (const b of allBtns) {
-              const text = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
-              if (text.includes('next') || text.includes('>') || text.includes('→') || text.includes('forward')) {
-                b.click();
-                break;
-              }
-            }
-          }
-        });
-        await new Promise(r => setTimeout(r, 500));
-      }
-
-      // Click the target day
-      await page.evaluate((d) => {
-        const dayCells = document.querySelectorAll('[class*="calendar"] td, [class*="calendar"] button, [class*="calendar"] div[class*="day"], .datepicker td, .day-cell');
-        for (const cell of dayCells) {
-          const text = (cell.innerText || cell.textContent || '').trim();
-          const isDisabled = cell.classList.contains('disabled') || cell.getAttribute('aria-disabled') === 'true';
-          if (!isDisabled && text === String(d)) {
-            cell.click();
-            return true;
-          }
-        }
-        return false;
-      }, day);
-      await new Promise(r => setTimeout(r, 1500));
-    } catch (e) {
-      console.log(`[AutoBook ElAl] Date setting error: ${e.message}`);
-    }
-
-    // ─── STEP 6: Click Search ───────────────────────────────
-    console.log('[AutoBook ElAl] Step 6: Clicking Search...');
-    try {
-      await page.evaluate(() => {
-        const btns = [...document.querySelectorAll('button, input[type="submit"], a[role="button"]')];
-        const searchBtn = btns.find(b => {
-          const text = (b.innerText || b.value || '').toLowerCase().trim();
-          return text.includes('search') || text.includes('find') || text.includes('חפש') || text.includes('חיפוש');
-        });
-        if (searchBtn) { searchBtn.click(); return true; }
-        // Fallback: look for a prominent submit button
-        const submitBtn = btns.find(b => b.type === 'submit' || b.classList.contains('search-btn'));
-        if (submitBtn) { submitBtn.click(); return true; }
-        return false;
-      });
-    } catch (e) {
-      console.log(`[AutoBook ElAl] Search click error: ${e.message}`);
-    }
-
-    // Wait for navigation to booking.elal.com
-    console.log('[AutoBook ElAl] Waiting for flight results on booking.elal.com...');
-    await waitSettle(30000);
-    await new Promise(r => setTimeout(r, 10000)); // Extra wait for El Al SPA to load results
-
-    let state = await logState('After search');
-
-    // Check if we landed on booking.elal.com
+    let state = await logState('After booking page load');
     let currentUrl = '';
     try { currentUrl = await page.evaluate(() => window.location.href); } catch (e) {}
-    console.log(`[AutoBook ElAl] Current URL after search: ${currentUrl}`);
 
-    if (!currentUrl.includes('booking.elal.com')) {
-      // Maybe the search didn't redirect. Try checking if we're still on the homepage
-      console.log('[AutoBook ElAl] Not on booking.elal.com — checking if search form had errors...');
-      const pageSnippet = await page.evaluate(() => document.body.innerText.substring(0, 1000)).catch(() => '');
-      await page.close();
-      return { booked: false, reason: 'El Al search did not navigate to booking page. Might need manual intervention.', pagePreview: pageSnippet.substring(0, 500) };
+    // Check if the booking SPA loaded with search results or a search form
+    const hasFlights = await page.evaluate(() => {
+      const text = document.body.innerText || '';
+      return /\$[\d,]+/.test(text) && /(economy|business|premium|LY\d)/i.test(text);
+    }).catch(() => false);
+
+    if (!hasFlights) {
+      // The SPA might have loaded but needs a search. Try filling the search form on booking.elal.com
+      console.log('[AutoBook ElAl] No flights visible, trying to fill search form on booking SPA...');
+      try {
+        // booking.elal.com has its own search form — fill it
+        await page.evaluate((orig, dest, date, pax) => {
+          // Try to set search via Angular service / localStorage
+          const searchData = {
+            origin: orig, destination: dest, date: date,
+            adults: pax, children: 0, infants: 0, isOneWay: true
+          };
+          // Some SPAs read from sessionStorage
+          sessionStorage.setItem('searchCriteria', JSON.stringify(searchData));
+          localStorage.setItem('searchCriteria', JSON.stringify(searchData));
+        }, watch.origin, watch.destination, watch.date, passengers);
+
+        // Look for search form inputs and fill them
+        const formExists = await page.evaluate((orig, dest) => {
+          const inputs = document.querySelectorAll('input');
+          let found = 0;
+          for (const inp of inputs) {
+            const ph = (inp.placeholder || inp.name || inp.id || '').toLowerCase();
+            if (/(from|origin|depart)/i.test(ph)) { inp.value = orig; inp.dispatchEvent(new Event('input', {bubbles: true})); found++; }
+            if (/(to|dest|arriv)/i.test(ph)) { inp.value = dest; inp.dispatchEvent(new Event('input', {bubbles: true})); found++; }
+          }
+          return found;
+        }, originCity, destCity);
+
+        if (formExists > 0) {
+          // Click search button
+          await page.evaluate(() => {
+            const btns = [...document.querySelectorAll('button')];
+            const searchBtn = btns.find(b => /(search|find|חפש)/i.test(b.innerText || ''));
+            if (searchBtn) searchBtn.click();
+          });
+          await new Promise(r => setTimeout(r, 15000));
+        } else {
+          // Last resort: reload with a clean booking URL
+          console.log('[AutoBook ElAl] No search form found, reloading...');
+          await page.goto(`https://booking.elal.com/booking/flights?market=US&lang=en`, { waitUntil: 'networkidle2', timeout: 60000 });
+          await new Promise(r => setTimeout(r, 8000));
+        }
+      } catch (e) {
+        console.log(`[AutoBook ElAl] Search form fill error: ${e.message}`);
+      }
+
+      state = await logState('After search attempt');
     }
 
-    // ─── STEP 7: Select flight (ECONOMY column) ─────────────
-    console.log('[AutoBook ElAl] Step 7: Selecting flight...');
+    // ─── STEP 2: Select flight (ECONOMY column) ─────────────
+    console.log('[AutoBook ElAl] Step 2: Selecting flight...');
     await new Promise(r => setTimeout(r, 5000)); // Wait for Angular to render flights
 
     const selectResult = await page.evaluate((pref, mPrice) => {
@@ -1375,8 +1218,8 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
       return { booked: false, reason: selectResult.reason, pagePreview: (selectResult.debug || '').substring(0, 500) };
     }
 
-    // ─── STEP 8: Select fare (CLASSIC) ──────────────────────
-    console.log('[AutoBook ElAl] Step 8: Selecting CLASSIC fare...');
+    // ─── STEP 3: Select fare (CLASSIC) ──────────────────────
+    console.log('[AutoBook ElAl] Step 3: Selecting CLASSIC fare...');
     await new Promise(r => setTimeout(r, 5000)); // Wait for fare sub-options to appear
 
     try {
@@ -1409,8 +1252,8 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
 
     await new Promise(r => setTimeout(r, 3000));
 
-    // ─── STEP 9: Click "Passenger Details >" ────────────────
-    console.log('[AutoBook ElAl] Step 9: Clicking Passenger Details...');
+    // ─── STEP 4: Click "Passenger Details >" ────────────────
+    console.log('[AutoBook ElAl] Step 4: Clicking Passenger Details...');
     try {
       // Scroll down to find the button
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
@@ -1461,8 +1304,8 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
       }
     }
 
-    // ─── STEP 10: Fill passenger form ───────────────────────
-    console.log('[AutoBook ElAl] Step 10: Filling passenger form...');
+    // ─── STEP 5: Fill passenger form ───────────────────────
+    console.log('[AutoBook ElAl] Step 5: Filling passenger form...');
 
     const formFields = {
       firstName: profile.firstName,
@@ -1596,7 +1439,7 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
 
     console.log(`[AutoBook ElAl] Filled ${filledCount} form fields`);
 
-    // ─── STEP 11: Click "Confirm and Continue" ──────────────
+    // ─── STEP 6: Click "Confirm and Continue" ──────────────
     await new Promise(r => setTimeout(r, 2000));
     let submitted = false;
     try {

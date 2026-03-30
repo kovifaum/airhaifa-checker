@@ -693,18 +693,28 @@ async function checkElAlDirect(origin, destination, date, passengers, bookingUrl
 
 // ─── Google Flights fallback for El Al ───────────────────
 async function checkElAlGoogleFlights(origin, destination, date, passengers, bookingUrl) {
-  const br = await getBrowser();
+  // Use BrightData proxy if available — Google blocks Render's datacenter IPs with CAPTCHA
+  const useProxy = hasBrightData;
+  const br = useProxy ? await getProxyBrowser() : await getBrowser();
   const page = await br.newPage();
   await page.setViewport({ width: 1366, height: 768 });
 
-  // Use structured Google Flights URL instead of free-text query
-  // Format: /travel/flights/search?tfs=...  or simpler: use the query param approach
+  if (useProxy) {
+    await page.authenticate({ username: BRIGHTDATA_USER, password: BRIGHTDATA_PASS });
+    console.log(`[GF] Using BrightData residential proxy to avoid Google CAPTCHA`);
+  }
+
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  });
+
   const gfQuery = `Flights from ${origin} to ${destination} on ${date} one way ${passengers} passenger`;
   const searchUrl = `https://www.google.com/travel/flights?q=${encodeURIComponent(gfQuery)}&hl=en`;
 
   try {
     console.log(`[GF] Google Flights fallback: ${searchUrl}`);
-    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+    await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: 90000 });
     await new Promise(r => setTimeout(r, 8000)); // extra wait for SPA rendering
 
     // Debug: log what we see on the page

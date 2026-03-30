@@ -307,11 +307,21 @@ async function checkElAl(origin, destination, date, passengers = 1) {
   }
 }
 
+// ─── Build Air Haifa URL from route + date ───────────────
+function buildAirHaifaUrl(origin, destination, date, passengers = 1) {
+  // Air Haifa URL format: https://airhaifa.com/flight-results/TLV-ATH/2026-03-30/NA/{pax}/0/0?breakdown=%7B%7D
+  return `https://airhaifa.com/flight-results/${origin}-${destination}/${date}/NA/${passengers}/0/0?breakdown=%7B%7D`;
+}
+
 // ─── Generic flight checker router ────────────────────────
 async function checkFlight(watch) {
   switch (watch.airline) {
-    case 'airhaifa':
-      return await checkAirHaifa(watch.url);
+    case 'airhaifa': {
+      // If no URL but has route+date, auto-generate the URL
+      const url = watch.url || buildAirHaifaUrl(watch.origin, watch.destination, watch.date, watch.passengers || 1);
+      watch.url = url; // store for notifications/booking
+      return await checkAirHaifa(url);
+    }
     case 'elal': {
       return await checkElAl(watch.origin, watch.destination, watch.date, watch.passengers || 1);
     }
@@ -360,7 +370,7 @@ async function attemptAutoBook(watch, flightResult) {
 
     await new Promise(r => setTimeout(r, 3000));
 
-    // Fill in passenger details
+    // Fill in passenger details + payment
     const formFields = {
       firstName: profile.firstName,
       lastName: profile.lastName,
@@ -368,6 +378,9 @@ async function attemptAutoBook(watch, flightResult) {
       phone: profile.phone,
       passport: profile.passport,
       dob: profile.dob,
+      cardNumber: profile.cardNumber,
+      cardExp: profile.cardExp,
+      cardCvv: profile.cardCvv,
     };
 
     for (const [field, value] of Object.entries(formFields)) {
@@ -388,6 +401,9 @@ async function attemptAutoBook(watch, flightResult) {
               phone: ['phone', 'tel', 'mobile', 'טלפון'],
               passport: ['passport', 'id', 'document', 'דרכון', 'תעודת זהות'],
               dob: ['birth', 'dob', 'date of birth', 'תאריך לידה'],
+              cardNumber: ['card', 'credit', 'cc', 'כרטיס אשראי', 'מספר כרטיס'],
+              cardExp: ['expir', 'exp', 'valid', 'תוקף'],
+              cardCvv: ['cvv', 'cvc', 'security', 'csv'],
             };
 
             const keywords = fieldMappings[f] || [f];
@@ -723,7 +739,7 @@ app.get('/api/status', (req, res) => {
 app.post('/api/watches', (req, res) => {
   const { airline, url, origin, destination, date, passengers, email, vtext, maxPrice, autoBook, profileId } = req.body;
 
-  if (airline === 'airhaifa' && !url) return res.status(400).json({ error: 'URL is required for Air Haifa' });
+  if (airline === 'airhaifa' && !url && (!origin || !destination || !date)) return res.status(400).json({ error: 'Either a URL or origin/destination/date is required for Air Haifa' });
   if (airline === 'elal' && (!origin || !destination || !date)) return res.status(400).json({ error: 'Origin, destination, and date are required for El Al' });
   if (!email && !vtext) return res.status(400).json({ error: 'Email or Verizon number is required for notifications' });
 
@@ -777,11 +793,17 @@ app.post('/api/check-now', async (req, res) => {
 
 // ─── User profiles (privacy-safe: in-memory only) ────────
 app.post('/api/profiles', (req, res) => {
-  const { firstName, lastName, email, phone, passport, dob, nationality } = req.body;
+  const { firstName, lastName, email, phone, passport, dob, nationality, cardNumber, cardExp, cardCvv } = req.body;
   if (!firstName || !lastName) return res.status(400).json({ error: 'First and last name required' });
 
   const id = uuidv4();
-  userProfiles[id] = { id, firstName, lastName, email, phone, passport, dob, nationality, createdAt: new Date().toISOString() };
+  userProfiles[id] = {
+    id, firstName, lastName, email, phone, passport, dob, nationality,
+    cardNumber: cardNumber || null,
+    cardExp: cardExp || null,
+    cardCvv: cardCvv || null,
+    createdAt: new Date().toISOString(),
+  };
   res.json({ success: true, id, name: `${firstName} ${lastName}` });
 });
 

@@ -330,25 +330,16 @@
           </div>
         </div>
 
-        <!-- Air Haifa: URL input -->
-        <div id="airhaifaFields">
-          <div class="form-group full" style="margin-bottom: 12px;">
-            <label>Air Haifa Flight URL</label>
-            <input type="url" id="urlInput" placeholder="https://airhaifa.com/flight-results/TLV-LCA/2026-03-30/..." />
-            <div class="form-hint">Paste the URL from airhaifa.com flight results page</div>
-          </div>
-        </div>
-
-        <!-- El Al: Route + Date inputs -->
-        <div id="elalFields" class="hidden">
+        <!-- Route + Date inputs (shared by both airlines) -->
+        <div id="routeFields">
           <div class="form-grid" style="margin-bottom: 12px;">
             <div class="form-group">
               <label>From (Airport Code)</label>
-              <input type="text" id="originInput" placeholder="TLV" maxlength="3" style="text-transform:uppercase" />
+              <input type="text" id="originInput" placeholder="TLV" maxlength="3" style="text-transform:uppercase" value="TLV" />
             </div>
             <div class="form-group">
               <label>To (Airport Code)</label>
-              <input type="text" id="destInput" placeholder="JFK" maxlength="3" style="text-transform:uppercase" />
+              <input type="text" id="destInput" placeholder="ATH" maxlength="3" style="text-transform:uppercase" />
             </div>
             <div class="form-group">
               <label>Date</label>
@@ -358,6 +349,15 @@
               <label>Return Date (optional)</label>
               <input type="date" id="returnDateInput" />
             </div>
+          </div>
+        </div>
+
+        <!-- Air Haifa: optional direct URL override -->
+        <div id="airhaifaUrlField">
+          <div class="form-group full" style="margin-bottom: 12px;">
+            <label>Or paste Air Haifa URL directly (optional)</label>
+            <input type="url" id="urlInput" placeholder="https://airhaifa.com/flight-results/TLV-ATH/2026-03-30/..." />
+            <div class="form-hint">Leave empty to auto-generate from route + date above</div>
           </div>
         </div>
 
@@ -410,6 +410,8 @@
           Quick Add — March 30-31
         </div>
         <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          <button class="btn-secondary" onclick="quickAdd('airhaifa','TLV','ATH','2026-03-30')">Air Haifa TLV→ATH Mar 30</button>
+          <button class="btn-secondary" onclick="quickAdd('airhaifa','TLV','ATH','2026-03-31')">Air Haifa TLV→ATH Mar 31</button>
           <button class="btn-secondary" onclick="quickAdd('elal','TLV','JFK','2026-03-30')">El Al TLV→JFK Mar 30</button>
           <button class="btn-secondary" onclick="quickAdd('elal','TLV','JFK','2026-03-31')">El Al TLV→JFK Mar 31</button>
           <button class="btn-secondary" onclick="quickAdd('elal','TLV','EWR','2026-03-30')">El Al TLV→EWR Mar 30</button>
@@ -472,6 +474,32 @@
             <input type="text" id="profNationality" placeholder="US" />
           </div>
         </div>
+
+        <div style="border-top:1px solid var(--border);margin:16px 0;padding-top:16px;">
+          <div class="card-title" style="font-size:14px;margin-bottom:12px;">
+            <div class="icon" style="width:28px;height:28px;font-size:13px;">💳</div>
+            Payment Info (optional)
+            <span class="subtitle">For auto-booking only</span>
+          </div>
+          <div class="privacy-notice" style="margin-bottom:12px;">
+            <strong>Encrypted in memory only.</strong> Credit card info is never written to disk or logs. It's only used if you enable auto-booking and is cleared on server restart.
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Card Number</label>
+              <input type="text" id="profCardNumber" placeholder="4111 1111 1111 1111" maxlength="19" autocomplete="off" />
+            </div>
+            <div class="form-group">
+              <label>Expiry (MM/YY)</label>
+              <input type="text" id="profCardExp" placeholder="12/27" maxlength="5" autocomplete="off" />
+            </div>
+            <div class="form-group">
+              <label>CVV</label>
+              <input type="password" id="profCardCvv" placeholder="***" maxlength="4" autocomplete="off" />
+            </div>
+          </div>
+        </div>
+
         <button class="btn-primary" onclick="addProfile()" style="margin-top:12px">
           <span id="addProfBtnText">Save Profile</span>
         </button>
@@ -505,8 +533,12 @@
     // ─── Airline form toggle ────────────────────
     function updateAirlineForm() {
       const airline = document.getElementById('airlineSelect').value;
-      document.getElementById('airhaifaFields').classList.toggle('hidden', airline !== 'airhaifa');
-      document.getElementById('elalFields').classList.toggle('hidden', airline !== 'elal');
+      // Route fields always visible for both airlines now
+      document.getElementById('routeFields').classList.remove('hidden');
+      // URL override only for Air Haifa
+      document.getElementById('airhaifaUrlField').classList.toggle('hidden', airline !== 'airhaifa');
+      // Update placeholder
+      document.getElementById('destInput').placeholder = airline === 'airhaifa' ? 'ATH' : 'JFK';
     }
 
     // ─── Profile selector for auto-book ─────────
@@ -557,16 +589,20 @@
         autoBook: document.getElementById('autoBookToggle').checked,
       };
 
+      // Both airlines use route + date
+      payload.origin = document.getElementById('originInput').value.trim().toUpperCase();
+      payload.destination = document.getElementById('destInput').value.trim().toUpperCase();
+      payload.date = document.getElementById('dateInput').value;
+
       if (airline === 'airhaifa') {
-        payload.url = document.getElementById('urlInput').value.trim();
-        if (!payload.url || !payload.url.includes('airhaifa.com')) {
-          showError('formError', 'Please enter a valid Air Haifa URL');
+        const urlOverride = document.getElementById('urlInput').value.trim();
+        if (urlOverride && urlOverride.includes('airhaifa.com')) {
+          payload.url = urlOverride;
+        } else if (!payload.origin || !payload.destination || !payload.date) {
+          showError('formError', 'Please fill in route + date, or paste an Air Haifa URL');
           return;
         }
       } else if (airline === 'elal') {
-        payload.origin = document.getElementById('originInput').value.trim().toUpperCase();
-        payload.destination = document.getElementById('destInput').value.trim().toUpperCase();
-        payload.date = document.getElementById('dateInput').value;
         if (!payload.origin || !payload.destination || !payload.date) {
           showError('formError', 'Please fill in origin, destination, and date');
           return;
@@ -649,6 +685,9 @@
         passport: document.getElementById('profPassport').value.trim(),
         dob: document.getElementById('profDob').value,
         nationality: document.getElementById('profNationality').value.trim(),
+        cardNumber: document.getElementById('profCardNumber').value.trim(),
+        cardExp: document.getElementById('profCardExp').value.trim(),
+        cardCvv: document.getElementById('profCardCvv').value.trim(),
       };
 
       if (!payload.firstName || !payload.lastName) {
@@ -666,7 +705,7 @@
         if (!res.ok) { showError('profError', data.error); return; }
         showToast(`Profile saved: ${payload.firstName} ${payload.lastName}`);
         // Clear form
-        ['profFirstName','profLastName','profEmail','profPhone','profPassport','profDob','profNationality'].forEach(id => document.getElementById(id).value = '');
+        ['profFirstName','profLastName','profEmail','profPhone','profPassport','profDob','profNationality','profCardNumber','profCardExp','profCardCvv'].forEach(id => document.getElementById(id).value = '');
         await loadStatus();
       } catch (e) {
         showError('profError', 'Error: ' + e.message);

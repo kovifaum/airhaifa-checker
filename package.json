@@ -1,0 +1,23 @@
+{
+  "name": "skywatch-flight-tracker",
+  "version": "2.0.0",
+  "description": "Multi-airline flight tracker with auto-booking, email & SMS alerts via vtext.com",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.18.3",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.13",
+    "puppeteer": "^22.0.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "uuid": "^9.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

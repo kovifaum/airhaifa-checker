@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SkyWatch — Flight Tracker & Auto-Booker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #080c14;
+      --surface: rgba(255,255,255,0.04);
+      --surface2: rgba(255,255,255,0.07);
+      --surface3: rgba(255,255,255,0.10);
+      --border: rgba(255,255,255,0.1);
+      --border2: rgba(255,255,255,0.15);
+      --text: #e8eaf6;
+      --text2: #8892a4;
+      --text3: #5b6478;
+      --blue: #3b82f6;
+      --blue2: #60a5fa;
+      --violet: #7c3aed;
+      --green: #10b981;
+      --green2: #34d399;
+      --red: #ef4444;
+      --amber: #f59e0b;
+      --radius: 16px;
+      --radius-sm: 10px;
+    }
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% -10%, rgba(59,130,246,0.12) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 80% 100%, rgba(124,58,237,0.1) 0%, transparent 60%),
+        radial-gradient(ellipse 40% 40% at 50% 50%, rgba(16,185,129,0.04) 0%, transparent 60%);
+      pointer-events: none; z-index: 0;
+    }
+    .wrapper { position: relative; z-index: 1; max-width: 1000px; margin: 0 auto; padding: 32px 20px 80px; }
+
+    /* Header */
+    .header { text-align: center; margin-bottom: 40px; }
+    .header-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 72px; height: 72px;
+      background: linear-gradient(135deg, var(--blue), var(--violet));
+      border-radius: 20px; font-size: 36px; margin-bottom: 16px;
+      box-shadow: 0 0 40px rgba(59,130,246,0.3);
+      animation: float 4s ease-in-out infinite;
+    }
+    @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+    .header h1 {
+      font-size: clamp(26px, 5vw, 40px); font-weight: 800;
+      background: linear-gradient(135deg, #fff 0%, var(--blue2) 50%, #a78bfa 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text; line-height: 1.2; margin-bottom: 8px;
+    }
+    .header p { color: var(--text2); font-size: 15px; max-width: 520px; margin: 0 auto; line-height: 1.6; }
+
+    /* Status bar */
+    .status-bar {
+      display: flex; align-items: center; gap: 12px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px 18px; margin-bottom: 28px;
+      backdrop-filter: blur(12px); flex-wrap: wrap;
+    }
+    .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green2); box-shadow: 0 0 0 0 rgba(52,211,153,0.4); animation: pulse-anim 2s infinite; flex-shrink: 0; }
+    .pulse.checking { background: var(--amber); }
+    .pulse.idle { background: var(--text3); animation: none; }
+    @keyframes pulse-anim {
+      0% { box-shadow: 0 0 0 0 rgba(52,211,153,0.4); }
+      70% { box-shadow: 0 0 0 8px rgba(52,211,153,0); }
+      100% { box-shadow: 0 0 0 0 rgba(52,211,153,0); }
+    }
+    .status-text { font-size: 14px; color: var(--text2); flex: 1; }
+    .status-text strong { color: var(--text); }
+    .countdown { font-size: 13px; color: var(--text3); font-variant-numeric: tabular-nums; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; }
+    .btn-sm { background: transparent; border: 1px solid var(--border2); color: var(--text2); font-size: 13px; padding: 6px 14px; border-radius: 8px; cursor: pointer; transition: all 0.2s; font-family: inherit; }
+    .btn-sm:hover { background: var(--surface2); color: var(--text); border-color: var(--blue); }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 4px; margin-bottom: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 4px; }
+    .tab { flex: 1; text-align: center; padding: 10px 16px; border-radius: 9px; font-size: 14px; font-weight: 500; color: var(--text3); cursor: pointer; transition: all 0.2s; border: none; background: transparent; font-family: inherit; }
+    .tab.active { background: linear-gradient(135deg, rgba(59,130,246,0.2), rgba(124,58,237,0.15)); color: var(--text); border: 1px solid rgba(59,130,246,0.3); }
+    .tab:hover:not(.active) { color: var(--text2); background: var(--surface2); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Cards */
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      backdrop-filter: blur(20px); border-radius: var(--radius);
+      padding: 24px; margin-bottom: 24px;
+    }
+    .card-title { font-size: 17px; font-weight: 700; margin-bottom: 18px; display: flex; align-items: center; gap: 10px; }
+    .card-title .icon {
+      width: 34px; height: 34px;
+      background: linear-gradient(135deg, rgba(59,130,246,0.2), rgba(124,58,237,0.2));
+      border: 1px solid rgba(59,130,246,0.3); border-radius: 10px;
+      display: flex; align-items: center; justify-content: center; font-size: 16px;
+    }
+    .card-title .subtitle { font-size: 12px; font-weight: 400; color: var(--text3); margin-left: auto; }
+
+    /* Form elements */
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .form-group { display: flex; flex-direction: column; gap: 5px; }
+    .form-group.full { grid-column: 1 / -1; }
+    .form-group.third { }
+    label { font-size: 12px; font-weight: 500; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
+    input, select {
+      background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text); font-family: inherit;
+      font-size: 14px; padding: 10px 12px; transition: all 0.2s; outline: none; width: 100%;
+    }
+    select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238892a4' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }
+    select option { background: #1a1f2e; color: var(--text); }
+    input::placeholder { color: var(--text3); }
+    input:focus, select:focus { border-color: var(--blue); background: rgba(59,130,246,0.06); box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
+    .form-hint { font-size: 11px; color: var(--text3); margin-top: 1px; }
+
+    /* Toggle switch */
+    .toggle-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+    .toggle-row .label-text { font-size: 14px; color: var(--text); flex: 1; }
+    .toggle-row .label-desc { font-size: 12px; color: var(--text3); }
+    .toggle {
+      position: relative; width: 44px; height: 24px; flex-shrink: 0;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle .slider {
+      position: absolute; cursor: pointer; inset: 0;
+      background: var(--surface3); border: 1px solid var(--border);
+      border-radius: 12px; transition: all 0.3s;
+    }
+    .toggle .slider::before {
+      content: ''; position: absolute; height: 18px; width: 18px;
+      left: 2px; bottom: 2px; background: var(--text3);
+      border-radius: 50%; transition: all 0.3s;
+    }
+    .toggle input:checked + .slider { background: rgba(59,130,246,0.3); border-color: var(--blue); }
+    .toggle input:checked + .slider::before { transform: translateX(20px); background: var(--blue2); }
+
+    /* Buttons */
+    .btn-primary {
+      background: linear-gradient(135deg, var(--blue), var(--violet));
+      border: none; border-radius: var(--radius-sm); color: #fff;
+      cursor: pointer; font-family: inherit; font-size: 15px; font-weight: 600;
+      padding: 12px 24px; transition: all 0.2s;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      width: 100%; margin-top: 4px; position: relative; overflow: hidden;
+    }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(59,130,246,0.35); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .btn-secondary {
+      background: var(--surface2); border: 1px solid var(--border2);
+      border-radius: var(--radius-sm); color: var(--text2);
+      cursor: pointer; font-family: inherit; font-size: 14px; font-weight: 500;
+      padding: 10px 20px; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    .btn-secondary:hover { background: var(--surface3); color: var(--text); }
+
+    .btn-danger { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: #f87171; }
+    .btn-danger:hover { background: rgba(239,68,68,0.2); }
+
+    .error-msg { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: var(--radius-sm); color: #fca5a5; font-size: 13px; padding: 10px 14px; margin-top: 10px; display: none; }
+    .error-msg.show { display: block; }
+
+    /* Watch cards */
+    .watch-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 18px; margin-bottom: 12px;
+      backdrop-filter: blur(12px); transition: border-color 0.3s, box-shadow 0.3s;
+      animation: slideIn 0.3s ease;
+    }
+    @keyframes slideIn { from { opacity:0; transform: translateY(-8px); } to { opacity:1; transform: translateY(0); } }
+    .watch-card.available { border-color: rgba(16,185,129,0.4); box-shadow: 0 0 20px rgba(16,185,129,0.08); }
+    .watch-card.not_available { border-color: rgba(239,68,68,0.15); }
+    .watch-card.checking { border-color: rgba(245,158,11,0.3); }
+    .watch-card.error { border-color: rgba(239,68,68,0.3); }
+    .watch-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
+    .badge {
+      flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 20px; white-space: nowrap;
+    }
+    .badge.available { background: rgba(16,185,129,0.15); color: var(--green2); border: 1px solid rgba(16,185,129,0.3); }
+    .badge.not_available { background: rgba(239,68,68,0.1); color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
+    .badge.checking { background: rgba(245,158,11,0.1); color: #fcd34d; border: 1px solid rgba(245,158,11,0.2); }
+    .badge.pending { background: rgba(148,163,184,0.1); color: var(--text3); border: 1px solid var(--border); }
+    .badge.error { background: rgba(239,68,68,0.1); color: #fca5a5; border: 1px solid rgba(239,68,68,0.2); }
+    .badge-airline { background: rgba(59,130,246,0.15); color: var(--blue2); border: 1px solid rgba(59,130,246,0.3); }
+    .watch-info { flex: 1; min-width: 0; }
+    .watch-route { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+    .watch-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+    .watch-meta-item { font-size: 11px; color: var(--text3); display: flex; align-items: center; gap: 4px; }
+    .watch-actions { display: flex; gap: 6px; align-items: center; }
+    .btn-icon {
+      width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border);
+      background: transparent; color: var(--text3); cursor: pointer;
+      display: flex; align-items: center; justify-content: center; font-size: 14px; transition: all 0.2s;
+    }
+    .btn-icon:hover { background: var(--surface2); color: var(--text); }
+    .btn-icon.danger:hover { background: rgba(239,68,68,0.1); color: #f87171; }
+
+    .availability-details {
+      background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.2);
+      border-radius: var(--radius-sm); padding: 12px; margin-top: 10px;
+    }
+    .availability-details h4 { font-size: 12px; font-weight: 600; color: var(--green2); margin-bottom: 8px; }
+    .flight-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(16,185,129,0.1); font-size: 12px; }
+    .flight-row:last-child { border-bottom: none; }
+    .flight-num { font-weight: 700; color: var(--text); }
+    .flight-route { color: var(--text2); }
+    .flight-seats { color: var(--green2); font-weight: 600; }
+    .flight-price { color: var(--amber); }
+    .notified-banner { display: flex; align-items: center; gap: 8px; background: rgba(124,58,237,0.1); border: 1px solid rgba(124,58,237,0.25); border-radius: var(--radius-sm); padding: 8px 12px; margin-top: 8px; font-size: 12px; color: #c4b5fd; }
+    .booking-banner { display: flex; align-items: center; gap: 8px; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.25); border-radius: var(--radius-sm); padding: 8px 12px; margin-top: 8px; font-size: 12px; color: var(--green2); }
+    .error-detail { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: var(--radius-sm); padding: 8px 12px; margin-top: 8px; font-size: 11px; color: #fca5a5; font-family: monospace; word-break: break-all; }
+
+    .empty-state { text-align: center; padding: 40px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text3); }
+    .empty-state .emoji { font-size: 40px; display: block; margin-bottom: 10px; }
+
+    /* Profile card */
+    .profile-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px; margin-bottom: 10px;
+      display: flex; align-items: center; gap: 14px;
+    }
+    .profile-avatar { width: 40px; height: 40px; border-radius: 10px; background: linear-gradient(135deg, var(--blue), var(--violet)); display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+    .profile-info { flex: 1; }
+    .profile-name { font-size: 15px; font-weight: 600; }
+    .profile-email { font-size: 12px; color: var(--text3); }
+
+    /* Privacy notice */
+    .privacy-notice {
+      background: rgba(59,130,246,0.05); border: 1px solid rgba(59,130,246,0.2);
+      border-radius: var(--radius-sm); padding: 12px 16px; margin-bottom: 16px;
+      font-size: 12px; color: var(--text2); line-height: 1.5;
+    }
+    .privacy-notice strong { color: var(--blue2); }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .form-group.full { grid-column: 1; }
+      .watch-header { flex-wrap: wrap; }
+      .tabs { flex-wrap: wrap; }
+    }
+
+    /* Spinner */
+    .spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Toast */
+    #toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(100px);
+      background: var(--surface2); border: 1px solid var(--border2); backdrop-filter: blur(20px);
+      border-radius: 12px; padding: 12px 20px; font-size: 14px; color: var(--text);
+      z-index: 1000; transition: transform 0.3s ease; white-space: nowrap;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    #toast.show { transform: translateX(-50%) translateY(0); }
+    #toast.success { border-color: rgba(16,185,129,0.4); }
+    #toast.error-toast { border-color: rgba(239,68,68,0.4); }
+
+    /* Conditional show/hide */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <!-- Header -->
+    <div class="header">
+      <div class="header-icon">✈️</div>
+      <h1>SkyWatch Flight Tracker</h1>
+      <p>Monitor flights across airlines. Get email &amp; SMS alerts the moment seats open up — or auto-book instantly.</p>
+    </div>
+
+    <!-- Status bar -->
+    <div class="status-bar">
+      <div class="pulse idle" id="pulseIndicator"></div>
+      <div class="status-text" id="statusText"><strong>Ready</strong> — Add a flight to start monitoring</div>
+      <div class="countdown" id="countdown" style="display:none">Next in <span id="countdownVal">30</span>s</div>
+      <button class="btn-sm" onclick="checkNow()" id="btnCheckNow" style="display:none">Check Now</button>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('monitor')">Add Flight</button>
+      <button class="tab" onclick="switchTab('watches')">Active Monitors <span id="watchCountTab"></span></button>
+      <button class="tab" onclick="switchTab('profiles')">My Info</button>
+    </div>
+
+    <!-- TAB: Add Flight Monitor -->
+    <div class="tab-content active" id="tab-monitor">
+      <div class="card">
+        <div class="card-title">
+          <div class="icon">+</div>
+          Add Flight to Monitor
+        </div>
+
+        <!-- Airline selector -->
+        <div class="form-grid" style="margin-bottom: 16px;">
+          <div class="form-group">
+            <label>Airline</label>
+            <select id="airlineSelect" onchange="updateAirlineForm()">
+              <option value="airhaifa">Air Haifa</option>
+              <option value="elal">El Al</option>
+            </select>
+          </div>
+          <div class="form-group" id="passengersGroup">
+            <label>Passengers</label>
+            <select id="passengersInput">
+              <option value="1">1 Adult</option>
+              <option value="2">2 Adults</option>
+              <option value="3">3 Adults</option>
+              <option value="4">4 Adults</option>
+              <option value="5">5 Adults</option>
+              <option value="6">6 Adults</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Air Haifa: URL input -->
+        <div id="airhaifaFields">
+          <div class="form-group full" style="margin-bottom: 12px;">
+            <label>Air Haifa Flight URL</label>
+            <input type="url" id="urlInput" placeholder="https://airhaifa.com/flight-results/TLV-LCA/2026-03-30/..." />
+            <div class="form-hint">Paste the URL from airhaifa.com flight results page</div>
+          </div>
+        </div>
+
+        <!-- El Al: Route + Date inputs -->
+        <div id="elalFields" class="hidden">
+          <div class="form-grid" style="margin-bottom: 12px;">
+            <div class="form-group">
+              <label>From (Airport Code)</label>
+              <input type="text" id="originInput" placeholder="TLV" maxlength="3" style="text-transform:uppercase" />
+            </div>
+            <div class="form-group">
+              <label>To (Airport Code)</label>
+              <input type="text" id="destInput" placeholder="JFK" maxlength="3" style="text-transform:uppercase" />
+            </div>
+            <div class="form-group">
+              <label>Date</label>
+              <input type="date" id="dateInput" />
+            </div>
+            <div class="form-group">
+              <label>Return Date (optional)</label>
+              <input type="date" id="returnDateInput" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Shared fields -->
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Max Price (optional)</label>
+            <input type="number" id="maxPriceInput" placeholder="No limit" min="0" step="10" />
+            <div class="form-hint">Leave empty for no limit. USD.</div>
+          </div>
+          <div class="form-group">
+            <label>Email Notification</label>
+            <input type="email" id="emailInput" placeholder="you@example.com" />
+          </div>
+          <div class="form-group">
+            <label>Verizon SMS (vtext.com)</label>
+            <input type="tel" id="vtextInput" placeholder="1234567890" />
+            <div class="form-hint">10-digit Verizon number for SMS alerts</div>
+          </div>
+          <div class="form-group">
+            <label>Auto-book Profile</label>
+            <select id="profileSelect">
+              <option value="">Notify only (no auto-book)</option>
+            </select>
+            <div class="form-hint">Select a profile to enable auto-booking</div>
+          </div>
+        </div>
+
+        <div class="toggle-row" id="autoBookToggleRow" style="display:none">
+          <div>
+            <div class="label-text">Enable Auto-Booking</div>
+            <div class="label-desc">Automatically attempt to book when seats are found</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="autoBookToggle" />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <button class="btn-primary" id="addBtn" onclick="addWatch()" style="margin-top: 12px;">
+          <span id="addBtnText">Start Monitoring</span>
+        </button>
+        <div class="error-msg" id="formError"></div>
+      </div>
+
+      <!-- Quick Add: Preset searches -->
+      <div class="card">
+        <div class="card-title">
+          <div class="icon">⚡</div>
+          Quick Add — March 30-31
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          <button class="btn-secondary" onclick="quickAdd('elal','TLV','JFK','2026-03-30')">El Al TLV→JFK Mar 30</button>
+          <button class="btn-secondary" onclick="quickAdd('elal','TLV','JFK','2026-03-31')">El Al TLV→JFK Mar 31</button>
+          <button class="btn-secondary" onclick="quickAdd('elal','TLV','EWR','2026-03-30')">El Al TLV→EWR Mar 30</button>
+          <button class="btn-secondary" onclick="quickAdd('elal','TLV','EWR','2026-03-31')">El Al TLV→EWR Mar 31</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: Active Monitors -->
+    <div class="tab-content" id="tab-watches">
+      <div class="watches-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+        <div style="font-size:17px;font-weight:700;">Active Monitors <span style="background:var(--surface2);border:1px solid var(--border);border-radius:20px;font-size:12px;font-weight:600;padding:3px 10px;color:var(--text2);margin-left:6px;" id="watchCount">0</span></div>
+      </div>
+      <div id="watchesList">
+        <div class="empty-state">
+          <span class="emoji">🛫</span>
+          <p>No flights being monitored yet.<br>Switch to "Add Flight" to get started.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB: User Profiles -->
+    <div class="tab-content" id="tab-profiles">
+      <div class="privacy-notice">
+        <strong>Privacy-Safe:</strong> Your personal info is stored in server memory only and is <strong>never saved to disk</strong>. Data is cleared when the server restarts. This info is only used for auto-booking if you enable it.
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <div class="icon">👤</div>
+          Add Passenger Profile
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>First Name</label>
+            <input type="text" id="profFirstName" placeholder="John" />
+          </div>
+          <div class="form-group">
+            <label>Last Name</label>
+            <input type="text" id="profLastName" placeholder="Doe" />
+          </div>
+          <div class="form-group">
+            <label>Email</label>
+            <input type="email" id="profEmail" placeholder="john@example.com" />
+          </div>
+          <div class="form-group">
+            <label>Phone</label>
+            <input type="tel" id="profPhone" placeholder="+1 555 000 0000" />
+          </div>
+          <div class="form-group">
+            <label>Passport / ID Number</label>
+            <input type="text" id="profPassport" placeholder="AB1234567" />
+          </div>
+          <div class="form-group">
+            <label>Date of Birth</label>
+            <input type="date" id="profDob" />
+          </div>
+          <div class="form-group">
+            <label>Nationality</label>
+            <input type="text" id="profNationality" placeholder="US" />
+          </div>
+        </div>
+        <button class="btn-primary" onclick="addProfile()" style="margin-top:12px">
+          <span id="addProfBtnText">Save Profile</span>
+        </button>
+        <div class="error-msg" id="profError"></div>
+      </div>
+
+      <div id="profilesList"></div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    let watches = [];
+    let profiles = [];
+    let nextCheckAt = null;
+    let isChecking = false;
+    let hasWatches = false;
+    let countdownTimer = null;
+    let pollTimer = null;
+
+    // ─── Tab switching ──────────────────────────
+    function switchTab(name) {
+      document.querySelectorAll('.tab').forEach((t, i) => {
+        t.classList.toggle('active', ['monitor','watches','profiles'][i] === name);
+      });
+      document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+      document.getElementById('tab-' + name).classList.add('active');
+    }
+
+    // ─── Airline form toggle ────────────────────
+    function updateAirlineForm() {
+      const airline = document.getElementById('airlineSelect').value;
+      document.getElementById('airhaifaFields').classList.toggle('hidden', airline !== 'airhaifa');
+      document.getElementById('elalFields').classList.toggle('hidden', airline !== 'elal');
+    }
+
+    // ─── Profile selector for auto-book ─────────
+    document.getElementById('profileSelect').addEventListener('change', function() {
+      const hasProfile = this.value !== '';
+      document.getElementById('autoBookToggleRow').style.display = hasProfile ? 'flex' : 'none';
+      if (!hasProfile) document.getElementById('autoBookToggle').checked = false;
+    });
+
+    // ─── Quick Add ──────────────────────────────
+    function quickAdd(airline, origin, dest, date) {
+      const email = document.getElementById('emailInput').value.trim();
+      const vtext = document.getElementById('vtextInput').value.trim();
+      if (!email && !vtext) {
+        showToast('Please enter an email or Verizon number first', 'error');
+        return;
+      }
+      addWatchDirect({ airline, origin, destination: dest, date, email, vtext });
+    }
+
+    // ─── Toast ──────────────────────────────────
+    function showToast(msg, type = 'success') {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = `show ${type === 'error' ? 'error-toast' : 'success'}`;
+      setTimeout(() => t.className = t.className.replace('show', ''), 3500);
+    }
+
+    function showError(id, msg) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.classList.add('show');
+    }
+
+    // ─── Add watch ──────────────────────────────
+    async function addWatch() {
+      const airline = document.getElementById('airlineSelect').value;
+      const errEl = document.getElementById('formError');
+      errEl.classList.remove('show');
+
+      const payload = {
+        airline,
+        email: document.getElementById('emailInput').value.trim() || null,
+        vtext: document.getElementById('vtextInput').value.trim() || null,
+        maxPrice: document.getElementById('maxPriceInput').value || null,
+        passengers: parseInt(document.getElementById('passengersInput').value) || 1,
+        profileId: document.getElementById('profileSelect').value || null,
+        autoBook: document.getElementById('autoBookToggle').checked,
+      };
+
+      if (airline === 'airhaifa') {
+        payload.url = document.getElementById('urlInput').value.trim();
+        if (!payload.url || !payload.url.includes('airhaifa.com')) {
+          showError('formError', 'Please enter a valid Air Haifa URL');
+          return;
+        }
+      } else if (airline === 'elal') {
+        payload.origin = document.getElementById('originInput').value.trim().toUpperCase();
+        payload.destination = document.getElementById('destInput').value.trim().toUpperCase();
+        payload.date = document.getElementById('dateInput').value;
+        if (!payload.origin || !payload.destination || !payload.date) {
+          showError('formError', 'Please fill in origin, destination, and date');
+          return;
+        }
+      }
+
+      if (!payload.email && !payload.vtext) {
+        showError('formError', 'Please enter an email or Verizon number');
+        return;
+      }
+
+      const btn = document.getElementById('addBtn');
+      const btnText = document.getElementById('addBtnText');
+      btn.disabled = true;
+      btnText.innerHTML = '<div class="spinner"></div> Adding...';
+
+      try {
+        const res = await fetch('/api/watches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) { showError('formError', data.error || 'Failed'); return; }
+        showToast('Monitoring started! First check coming up...');
+        await loadStatus();
+        switchTab('watches');
+      } catch (e) {
+        showError('formError', 'Network error: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btnText.textContent = 'Start Monitoring';
+      }
+    }
+
+    async function addWatchDirect(payload) {
+      try {
+        const res = await fetch('/api/watches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) { showToast(data.error || 'Failed', 'error'); return; }
+        showToast(`Added ${payload.airline === 'elal' ? 'El Al' : 'Air Haifa'} ${payload.origin||''}-${payload.destination||''} ${payload.date||''}`);
+        await loadStatus();
+        switchTab('watches');
+      } catch (e) {
+        showToast('Network error', 'error');
+      }
+    }
+
+    // ─── Remove watch ───────────────────────────
+    async function removeWatch(id) {
+      try {
+        await fetch(`/api/watches/${id}`, { method: 'DELETE' });
+        showToast('Removed');
+        await loadStatus();
+      } catch (e) {}
+    }
+
+    // ─── Check now ──────────────────────────────
+    async function checkNow() {
+      try {
+        await fetch('/api/check-now', { method: 'POST' });
+        showToast('Manual check triggered');
+      } catch (e) {}
+    }
+
+    // ─── Profiles ───────────────────────────────
+    async function addProfile() {
+      const errEl = document.getElementById('profError');
+      errEl.classList.remove('show');
+
+      const payload = {
+        firstName: document.getElementById('profFirstName').value.trim(),
+        lastName: document.getElementById('profLastName').value.trim(),
+        email: document.getElementById('profEmail').value.trim(),
+        phone: document.getElementById('profPhone').value.trim(),
+        passport: document.getElementById('profPassport').value.trim(),
+        dob: document.getElementById('profDob').value,
+        nationality: document.getElementById('profNationality').value.trim(),
+      };
+
+      if (!payload.firstName || !payload.lastName) {
+        showError('profError', 'First and last name required');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/profiles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) { showError('profError', data.error); return; }
+        showToast(`Profile saved: ${payload.firstName} ${payload.lastName}`);
+        // Clear form
+        ['profFirstName','profLastName','profEmail','profPhone','profPassport','profDob','profNationality'].forEach(id => document.getElementById(id).value = '');
+        await loadStatus();
+      } catch (e) {
+        showError('profError', 'Error: ' + e.message);
+      }
+    }
+
+    async function removeProfile(id) {
+      try {
+        await fetch(`/api/profiles/${id}`, { method: 'DELETE' });
+        showToast('Profile removed');
+        await loadStatus();
+      } catch (e) {}
+    }
+
+    function renderProfiles() {
+      const list = document.getElementById('profilesList');
+      const select = document.getElementById('profileSelect');
+
+      // Update select dropdown
+      const currentVal = select.value;
+      select.innerHTML = '<option value="">Notify only (no auto-book)</option>';
+      profiles.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = `${p.firstName} ${p.lastName}`;
+        select.appendChild(opt);
+      });
+      if (currentVal) select.value = currentVal;
+
+      if (profiles.length === 0) {
+        list.innerHTML = '<div class="empty-state" style="padding:28px"><span class="emoji">👤</span><p>No profiles yet. Add one above for auto-booking.</p></div>';
+        return;
+      }
+
+      list.innerHTML = profiles.map(p => `
+        <div class="profile-card">
+          <div class="profile-avatar">👤</div>
+          <div class="profile-info">
+            <div class="profile-name">${p.firstName} ${p.lastName}</div>
+            <div class="profile-email">${p.email || 'No email'}</div>
+          </div>
+          <button class="btn-icon danger" onclick="removeProfile('${p.id}')" title="Remove">✕</button>
+        </div>
+      `).join('');
+    }
+
+    // ─── Render watches ─────────────────────────
+    function fmtTime(iso) {
+      if (!iso) return '—';
+      return new Date(iso).toLocaleTimeString();
+    }
+
+    function renderWatches(data) {
+      watches = data.watches;
+      profiles = data.profiles || [];
+      isChecking = data.isChecking;
+      nextCheckAt = data.nextCheckAt ? new Date(data.nextCheckAt) : null;
+      hasWatches = watches.length > 0;
+
+      document.getElementById('watchCount').textContent = watches.length;
+      document.getElementById('watchCountTab').textContent = watches.length > 0 ? `(${watches.length})` : '';
+
+      // Status bar
+      const pulse = document.getElementById('pulseIndicator');
+      const statusText = document.getElementById('statusText');
+      const countdownEl = document.getElementById('countdown');
+      const btnCheck = document.getElementById('btnCheckNow');
+
+      if (!hasWatches) {
+        pulse.className = 'pulse idle';
+        statusText.innerHTML = '<strong>Ready</strong> — Add a flight to start monitoring';
+        countdownEl.style.display = 'none';
+        btnCheck.style.display = 'none';
+      } else if (isChecking) {
+        pulse.className = 'pulse checking';
+        statusText.innerHTML = '<strong>Checking flights...</strong>';
+        countdownEl.style.display = 'none';
+        btnCheck.style.display = 'none';
+      } else {
+        pulse.className = 'pulse';
+        const available = watches.filter(w => w.available).length;
+        statusText.innerHTML = `Monitoring <strong>${watches.length}</strong> flight(s) · <strong style="color:var(--green2)">${available} available</strong>`;
+        countdownEl.style.display = '';
+        btnCheck.style.display = '';
+      }
+
+      // Render profile list
+      renderProfiles();
+
+      // Render watch cards
+      const list = document.getElementById('watchesList');
+      if (watches.length === 0) {
+        list.innerHTML = '<div class="empty-state"><span class="emoji">🛫</span><p>No flights being monitored yet.</p></div>';
+        return;
+      }
+
+      list.innerHTML = watches.map(w => {
+        const statusClass = w.status || 'pending';
+        const badges = {
+          available: '✅ Available',
+          not_available: '❌ Unavailable',
+          checking: '⟳ Checking...',
+          pending: '⏳ Pending',
+          error: '⚠️ Error',
+        };
+        const airlineLabel = w.airline === 'elal' ? 'El Al' : w.airline === 'airhaifa' ? 'Air Haifa' : w.airline;
+        const routeText = w.origin && w.destination ? `${w.origin} → ${w.destination}` : (w.url ? w.url.match(/([A-Z]{3}-[A-Z]{3})/)?.[1]?.replace('-',' → ') || 'Custom URL' : 'Custom');
+        const dateText = w.date || (w.url ? w.url.match(/(\d{4}-\d{2}-\d{2})/)?.[1] : null) || '';
+
+        let detailsHtml = '';
+        if (w.available && w.flights && w.flights.length > 0) {
+          detailsHtml += `<div class="availability-details"><h4>✈️ Available Flights</h4>` +
+            w.flights.map(f => `
+              <div class="flight-row">
+                <span class="flight-num">${f.airline || ''} ${f.flightNum || ''}</span>
+                <span class="flight-route">${f.from} → ${f.to}</span>
+                ${f.departure ? `<span style="color:var(--text3)">${String(f.departure).substring(0, 16)}</span>` : ''}
+                <span class="flight-seats">${f.freeSeats} seat(s)</span>
+                ${f.price ? `<span class="flight-price">$${f.price} ${f.currency || ''}</span>` : ''}
+              </div>`).join('') + `</div>`;
+        }
+        if (w.notified) {
+          detailsHtml += `<div class="notified-banner">🔔 Notification sent at ${fmtTime(w.notifiedAt)}</div>`;
+        }
+        if (w.bookingResult) {
+          detailsHtml += `<div class="booking-banner">${w.bookingResult.booked ? '✅' : '⚠️'} ${w.bookingResult.reason}</div>`;
+        }
+        if (w.error) {
+          detailsHtml += `<div class="error-detail">${w.error}</div>`;
+        }
+
+        return `
+          <div class="watch-card ${statusClass}">
+            <div class="watch-header">
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <span class="badge badge-airline">${airlineLabel}</span>
+                <span class="badge ${statusClass}">${badges[statusClass] || statusClass}</span>
+                ${w.autoBook ? '<span class="badge" style="background:rgba(124,58,237,0.15);color:#c4b5fd;border:1px solid rgba(124,58,237,0.3);">Auto-Book</span>' : ''}
+              </div>
+              <div class="watch-info">
+                <div class="watch-route">${routeText}</div>
+                <div class="watch-meta">
+                  ${dateText ? `<span class="watch-meta-item">📅 ${dateText}</span>` : ''}
+                  ${w.email ? `<span class="watch-meta-item">📧 ${w.email}</span>` : ''}
+                  ${w.vtext ? `<span class="watch-meta-item">📱 ${w.vtext}</span>` : ''}
+                  ${w.maxPrice ? `<span class="watch-meta-item">💰 Max $${w.maxPrice}</span>` : ''}
+                  <span class="watch-meta-item">🕐 ${w.lastChecked ? fmtTime(w.lastChecked) : 'Not yet'}</span>
+                  ${w.freeSeats != null ? `<span class="watch-meta-item" style="color:${w.freeSeats > 0 ? 'var(--green2)' : 'var(--text3)'}">💺 ${w.freeSeats}</span>` : ''}
+                </div>
+              </div>
+              <div class="watch-actions">
+                <button class="btn-icon danger" onclick="removeWatch('${w.id}')" title="Remove">✕</button>
+              </div>
+            </div>
+            ${detailsHtml}
+          </div>`;
+      }).join('');
+    }
+
+    // ─── Polling & countdown ────────────────────
+    async function loadStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        renderWatches(data);
+      } catch (e) {
+        console.error('Status fetch failed:', e);
+      }
+    }
+
+    function updateCountdown() {
+      if (!nextCheckAt || !hasWatches) return;
+      const remaining = Math.max(0, Math.ceil((nextCheckAt - Date.now()) / 1000));
+      document.getElementById('countdownVal').textContent = remaining;
+    }
+
+    async function startPolling() {
+      await loadStatus();
+      if (countdownTimer) clearInterval(countdownTimer);
+      if (pollTimer) clearInterval(pollTimer);
+      countdownTimer = setInterval(updateCountdown, 1000);
+      pollTimer = setInterval(loadStatus, 3000);
+    }
+
+    // Enter key submits forms
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      const active = document.activeElement;
+      if (!active) return;
+      const id = active.id;
+      if (['urlInput','originInput','destInput','dateInput','emailInput','vtextInput','maxPriceInput'].includes(id)) addWatch();
+      if (['profFirstName','profLastName','profEmail','profPhone','profPassport'].includes(id)) addProfile();
+    });
+
+    // Set default dates
+    document.getElementById('dateInput').value = '2026-03-30';
+
+    startPolling();
+  </script>
+</body>
+</html>

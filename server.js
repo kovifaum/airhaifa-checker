@@ -1031,16 +1031,161 @@ async function attemptAutoBook(watch, flightResult) {
   }
 }
 
-// ─── El Al booking link generator ────────────────────────
-// El Al blocks all automated booking (Akamai + WAF on both www.elal.com and booking.elal.com).
-// Instead of fighting bot protection, we generate a direct booking link the user can click.
+// ─── Stealth helpers for El Al booking ───────────────────
+function randomDelay(min = 200, max = 800) {
+  return new Promise(r => setTimeout(r, Math.floor(Math.random() * (max - min)) + min));
+}
+
+async function humanType(page, selector, text) {
+  await page.focus(selector);
+  await randomDelay(100, 300);
+  for (const char of text) {
+    await page.keyboard.type(char, { delay: Math.floor(Math.random() * 120) + 40 });
+    if (Math.random() < 0.1) await randomDelay(200, 600); // occasional pause
+  }
+}
+
+async function humanClick(page, selector) {
+  const el = await page.$(selector);
+  if (!el) return false;
+  const box = await el.boundingBox();
+  if (!box) return false;
+  // Move to element with slight randomness
+  const x = box.x + box.width * (0.3 + Math.random() * 0.4);
+  const y = box.y + box.height * (0.3 + Math.random() * 0.4);
+  await page.mouse.move(x, y, { steps: Math.floor(Math.random() * 10) + 5 });
+  await randomDelay(50, 200);
+  await page.mouse.click(x, y);
+  return true;
+}
+
+// Apply heavy anti-detection overrides to a page
+async function applyStealthOverrides(page) {
+  await page.evaluateOnNewDocument(() => {
+    // Override webdriver flag
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    // Override plugins to look real
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => {
+        const plugins = [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+          { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+        ];
+        plugins.length = 3;
+        return plugins;
+      },
+    });
+
+    // Override languages
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'he'] });
+
+    // Chrome runtime
+    window.chrome = {
+      runtime: { onConnect: { addListener: () => {} }, sendMessage: () => {}, id: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+      loadTimes: () => ({ requestTime: Date.now() / 1000 - Math.random() * 5 }),
+      csi: () => ({ startE: Date.now(), onloadT: Date.now() + 300 }),
+    };
+
+    // Override permissions query
+    const origQuery = window.Permissions?.prototype?.query;
+    if (origQuery) {
+      window.Permissions.prototype.query = function(parameters) {
+        if (parameters.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission });
+        }
+        return origQuery.call(this, parameters);
+      };
+    }
+
+    // Fake canvas fingerprint (subtle noise)
+    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function(type) {
+      if (this.width > 16 && this.height > 16) {
+        const ctx = this.getContext('2d');
+        if (ctx) {
+          const imageData = ctx.getImageData(0, 0, 1, 1);
+          imageData.data[0] = imageData.data[0] ^ 1; // tiny noise
+          ctx.putImageData(imageData, 0, 0);
+        }
+      }
+      return origToDataURL.call(this, type);
+    };
+
+    // WebGL vendor/renderer
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(param) {
+      if (param === 37445) return 'Intel Inc.';
+      if (param === 37446) return 'Intel Iris OpenGL Engine';
+      return getParameter.call(this, param);
+    };
+
+    // Fake connection info
+    if (navigator.connection) {
+      Object.defineProperty(navigator.connection, 'rtt', { get: () => 50 + Math.floor(Math.random() * 100) });
+    }
+
+    // Override deviceMemory and hardwareConcurrency
+    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+
+    // Remove automation indicators from DOM
+    const observer = new MutationObserver(() => {
+      document.querySelectorAll('[aria-label*="automation"], [class*="automation"]').forEach(el => el.remove());
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  });
+}
+
+// Launch a fresh stealth browser for El Al booking
+async function launchStealthBrowser(useProxy = true) {
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+  const randomUA = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  ];
+  const ua = randomUA[Math.floor(Math.random() * randomUA.length)];
+
+  const args = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-blink-features=AutomationControlled',
+    '--disable-infobars',
+    '--disable-background-timer-throttling',
+    '--disable-renderer-backgrounding',
+    '--window-size=1366,768',
+    `--user-agent=${ua}`,
+    '--lang=en-US,en',
+  ];
+
+  if (useProxy && hasBrightData) {
+    args.push(`--proxy-server=http://${BRIGHTDATA_HOST}:${BRIGHTDATA_PORT}`);
+    args.push('--ignore-certificate-errors');
+  }
+
+  const launchOpts = {
+    headless: 'new',
+    args,
+    ignoreDefaultArgs: ['--enable-automation'],
+  };
+  if (executablePath) launchOpts.executablePath = executablePath;
+
+  const stealthBrowser = await puppeteerExtra.launch(launchOpts);
+  return stealthBrowser;
+}
+
+// ─── El Al stealth auto-booker ──────────────────────────
+// Attempts real booking via booking.elal.com Angular SPA with aggressive anti-detection.
+// Falls back to booking links if stealth fails.
 async function attemptAutoBookElAl(watch, flightResult, profile) {
-  // El Al actively blocks all headless browsers (Akamai on www.elal.com, WAF on booking.elal.com).
-  // Instead, we generate a direct booking link and include it in the notification.
   const passengers = watch.passengers || 1;
   const cabinPref = (watch.cabinClass || 'economy').toLowerCase();
 
-  // Pick the best flight from results
+  // Pick the best (cheapest) flight from results
   let bestFlight = null;
   if (flightResult.flights && flightResult.flights.length > 0) {
     const sorted = [...flightResult.flights].sort((a, b) => {
@@ -1051,27 +1196,343 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
     bestFlight = sorted[0];
   }
 
-  // Build El Al booking link — this opens the search on elal.com for the user to click through
-  const elAlSearchUrl = `https://www.elal.com/flight-deals/flights-from-${watch.origin.toLowerCase()}-to-${watch.destination.toLowerCase()}/`;
+  // Always generate fallback booking links
+  const elAlSearchUrl = `https://www.elal.com/en/booking/flight-select/?isOneWay=true&origin=${watch.origin}&destination=${watch.destination}&dep=${watch.date}&adult=${passengers}`;
   const googleFlightsUrl = `https://www.google.com/travel/flights?q=Flights+from+${watch.origin}+to+${watch.destination}+on+${watch.date}+one+way+${passengers}+passenger&hl=en`;
+  const bookingLinks = { elal: elAlSearchUrl, google: googleFlightsUrl };
 
-  const bookingLinks = {
-    elal: elAlSearchUrl,
-    google: googleFlightsUrl,
-  };
+  // --- ATTEMPT 1: Stealth booking via booking.elal.com ---
+  let stealthBrowser = null;
+  try {
+    console.log(`[AutoBook ElAl] Launching stealth browser for booking...`);
+    stealthBrowser = await launchStealthBrowser(true);
+    const page = await stealthBrowser.newPage();
 
-  console.log(`[AutoBook ElAl] Generated booking links for ${watch.origin}→${watch.destination} on ${watch.date}`);
-  console.log(`[AutoBook ElAl] Best flight: ${bestFlight ? bestFlight.airline + ' ' + bestFlight.flightNum + ' $' + bestFlight.price : 'unknown'}`);
+    // Apply heavy anti-detection
+    await applyStealthOverrides(page);
+    await page.setViewport({ width: 1366, height: 768 });
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9,he;q=0.8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"macOS"',
+    });
 
-  return {
-    booked: false,
-    reason: bestFlight
-      ? `Found ${bestFlight.airline} ${bestFlight.flightNum} at $${bestFlight.price} — click the booking link to complete your reservation`
-      : `Flights available — click the booking link to book on El Al`,
-    bookingLinks,
-    selectedFlight: bestFlight,
-    isLinkOnly: true,
-  };
+    // Authenticate with BrightData if using proxy
+    if (hasBrightData) {
+      await page.authenticate({ username: BRIGHTDATA_USER, password: BRIGHTDATA_PASS });
+    }
+
+    // Navigate to El Al booking search page
+    const bookingUrl = `https://booking.elal.com/newbe/booking/availability?isOneWay=true&origin=${watch.origin}&destination=${watch.destination}&ADT=${passengers}&CHD=0&INF=0&dep=${watch.date}&promoCode=&cls=Economy&flex=1`;
+    console.log(`[AutoBook ElAl] Navigating to: ${bookingUrl}`);
+
+    await page.goto(bookingUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+    await randomDelay(3000, 5000);
+
+    // Check if we got blocked
+    const pageTitle = await page.title();
+    const bodyPreview = await page.evaluate(() => (document.body && document.body.innerText || '').substring(0, 500));
+    console.log(`[AutoBook ElAl] Page title: "${pageTitle}"`);
+    console.log(`[AutoBook ElAl] Body preview: "${bodyPreview.substring(0, 200)}"`);
+
+    const isBlocked = pageTitle.toLowerCase().includes('not allowed') ||
+                      pageTitle.toLowerCase().includes('access denied') ||
+                      pageTitle.toLowerCase().includes('blocked') ||
+                      bodyPreview.toLowerCase().includes('request is not allowed') ||
+                      bodyPreview.toLowerCase().includes('access denied');
+
+    if (isBlocked) {
+      console.log(`[AutoBook ElAl] ⚠️ BLOCKED by WAF — falling back to booking links`);
+      await page.close();
+      await stealthBrowser.close();
+
+      return {
+        booked: false,
+        reason: bestFlight
+          ? `Found ${bestFlight.airline} ${bestFlight.flightNum} at $${bestFlight.price} — El Al blocked automated booking, use the links below`
+          : `Flights available — El Al blocked automated booking, use the links below`,
+        bookingLinks,
+        selectedFlight: bestFlight,
+        isLinkOnly: true,
+        stealthAttempted: true,
+      };
+    }
+
+    // ─── STEP 1: Wait for Angular SPA to load flight results ───
+    console.log(`[AutoBook ElAl] Page loaded! Waiting for flight results to render...`);
+    await randomDelay(5000, 8000);
+
+    // Simulate human scrolling
+    await page.mouse.move(683, 400);
+    await page.mouse.wheel({ deltaY: 300 });
+    await randomDelay(1000, 2000);
+
+    // Look for flight selection buttons/cards
+    const flightCards = await page.evaluate(() => {
+      const cards = document.querySelectorAll('[class*="flight"], [class*="Flight"], [class*="offer"], [class*="result"], [class*="journey"], [class*="avail"], button[class*="fare"], [class*="bound"]');
+      return Array.from(cards).map((c, i) => ({
+        index: i,
+        text: (c.innerText || '').substring(0, 200),
+        tag: c.tagName,
+        hasPrice: /\$|₪|\d+/.test(c.innerText || ''),
+        isClickable: c.tagName === 'BUTTON' || c.tagName === 'A' || c.getAttribute('role') === 'button' || c.style.cursor === 'pointer',
+      }));
+    });
+
+    console.log(`[AutoBook ElAl] Found ${flightCards.length} potential flight cards`);
+    flightCards.forEach((c, i) => {
+      if (i < 5) console.log(`[AutoBook ElAl]   Card ${i}: [${c.tag}] "${c.text.substring(0, 80)}" price=${c.hasPrice} clickable=${c.isClickable}`);
+    });
+
+    // ─── STEP 2: Click cheapest/first flight ───
+    let clickedFlight = false;
+    if (flightCards.length > 0) {
+      // Try clicking the first card with a price
+      const priceCard = flightCards.find(c => c.hasPrice) || flightCards[0];
+      const allCards = await page.$$('[class*="flight"], [class*="Flight"], [class*="offer"], [class*="result"], [class*="journey"], [class*="avail"], button[class*="fare"], [class*="bound"]');
+      if (allCards[priceCard.index]) {
+        const box = await allCards[priceCard.index].boundingBox();
+        if (box) {
+          console.log(`[AutoBook ElAl] Clicking flight card ${priceCard.index}...`);
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
+          await randomDelay(200, 500);
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          clickedFlight = true;
+          await randomDelay(3000, 5000);
+        }
+      }
+    }
+
+    // Also try clicking any "Select" or "Choose" or "בחר" buttons
+    if (!clickedFlight) {
+      const selectClicked = await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button, a, [role="button"]')];
+        const selectBtn = btns.find(b => {
+          const t = (b.innerText || '').toLowerCase();
+          return t.includes('select') || t.includes('choose') || t.includes('בחר') || t.includes('continue');
+        });
+        if (selectBtn) { selectBtn.click(); return true; }
+        return false;
+      });
+      if (selectClicked) {
+        clickedFlight = true;
+        console.log(`[AutoBook ElAl] Clicked select/choose button`);
+        await randomDelay(3000, 5000);
+      }
+    }
+
+    // ─── STEP 3: Handle fare selection (Economy/Flex/Business) ───
+    await randomDelay(2000, 3000);
+    const fareClicked = await page.evaluate((pref) => {
+      const btns = [...document.querySelectorAll('button, a, [role="button"], [class*="fare"], [class*="Fare"]')];
+      // Try to match preferred cabin class
+      const fareBtn = btns.find(b => {
+        const t = (b.innerText || '').toLowerCase();
+        return t.includes(pref) || t.includes('classic') || t.includes('lite') || t.includes('economy');
+      });
+      if (fareBtn) { fareBtn.click(); return true; }
+      // Fallback: click first fare option
+      const anyFare = btns.find(b => (b.innerText || '').toLowerCase().match(/(select|choose|from \$|add to cart|continue|בחר)/));
+      if (anyFare) { anyFare.click(); return true; }
+      return false;
+    }, cabinPref);
+    if (fareClicked) console.log(`[AutoBook ElAl] Selected fare option`);
+    await randomDelay(3000, 5000);
+
+    // ─── STEP 4: Fill passenger details form ───
+    // El Al uses Angular form with specific IDs: #form-0-civility, #form-0-firstName, etc.
+    const formExists = await page.evaluate(() => {
+      return !!(document.querySelector('#form-0-firstName') ||
+                document.querySelector('[formcontrolname="firstName"]') ||
+                document.querySelector('input[name*="first"]') ||
+                document.querySelector('input[placeholder*="First"]'));
+    });
+
+    if (formExists) {
+      console.log(`[AutoBook ElAl] 🎯 Passenger form detected! Filling details...`);
+
+      // Title/Civility
+      try {
+        const civilitySelector = '#form-0-civility, [formcontrolname="civility"], select[name*="title"], select[name*="civility"]';
+        const hasCivility = await page.$(civilitySelector);
+        if (hasCivility) {
+          await humanClick(page, civilitySelector);
+          await randomDelay(300, 600);
+          await page.select(civilitySelector, 'MR').catch(() => {});
+          // Also try clicking "Mr" option if it's a dropdown
+          await page.evaluate(() => {
+            const opts = document.querySelectorAll('option, [role="option"], li');
+            const mrOpt = [...opts].find(o => (o.innerText || '').match(/^Mr\.?$/i));
+            if (mrOpt) mrOpt.click();
+          });
+          await randomDelay(500, 800);
+        }
+      } catch (e) { console.log(`[AutoBook ElAl] Civility: ${e.message}`); }
+
+      // First Name
+      try {
+        const fnSelector = '#form-0-firstName, [formcontrolname="firstName"], input[name*="first"], input[placeholder*="First"]';
+        const hasFn = await page.$(fnSelector);
+        if (hasFn) {
+          await humanType(page, fnSelector, profile.firstName);
+          console.log(`[AutoBook ElAl] ✓ First name filled`);
+          await randomDelay(300, 700);
+        }
+      } catch (e) { console.log(`[AutoBook ElAl] First name: ${e.message}`); }
+
+      // Last Name
+      try {
+        const lnSelector = '#form-0-lastName, [formcontrolname="lastName"], input[name*="last"], input[placeholder*="Last"]';
+        const hasLn = await page.$(lnSelector);
+        if (hasLn) {
+          await humanType(page, lnSelector, profile.lastName);
+          console.log(`[AutoBook ElAl] ✓ Last name filled`);
+          await randomDelay(300, 700);
+        }
+      } catch (e) { console.log(`[AutoBook ElAl] Last name: ${e.message}`); }
+
+      // Date of Birth (month, day, year separate fields)
+      if (profile.dob) {
+        const dobParts = profile.dob.split(/[-\/]/); // expect YYYY-MM-DD or MM/DD/YYYY
+        let dobMonth, dobDay, dobYear;
+        if (dobParts[0].length === 4) { // YYYY-MM-DD
+          dobYear = dobParts[0]; dobMonth = dobParts[1]; dobDay = dobParts[2];
+        } else { // MM/DD/YYYY
+          dobMonth = dobParts[0]; dobDay = dobParts[1]; dobYear = dobParts[2];
+        }
+        try {
+          const monthSel = '#form-0-month, [formcontrolname="month"], select[name*="month"]';
+          if (await page.$(monthSel)) { await page.select(monthSel, String(parseInt(dobMonth))).catch(() => {}); }
+          await randomDelay(300, 500);
+          const daySel = '#form-0-day, [formcontrolname="day"], select[name*="day"]';
+          if (await page.$(daySel)) { await page.select(daySel, String(parseInt(dobDay))).catch(() => {}); }
+          await randomDelay(300, 500);
+          const yearSel = '#form-0-year, [formcontrolname="year"], select[name*="year"]';
+          if (await page.$(yearSel)) { await page.select(yearSel, dobYear).catch(() => {}); }
+          console.log(`[AutoBook ElAl] ✓ DOB filled`);
+          await randomDelay(300, 700);
+        } catch (e) { console.log(`[AutoBook ElAl] DOB: ${e.message}`); }
+      }
+
+      // Email
+      try {
+        const emailSel = '#form-0-email, [formcontrolname="email"], input[type="email"], input[name*="email"]';
+        const hasEmail = await page.$(emailSel);
+        if (hasEmail) {
+          await humanType(page, emailSel, profile.email || watch.email);
+          console.log(`[AutoBook ElAl] ✓ Email filled`);
+          await randomDelay(300, 700);
+        }
+      } catch (e) { console.log(`[AutoBook ElAl] Email: ${e.message}`); }
+
+      // Phone
+      try {
+        const phoneSel = '#form-0-number, [formcontrolname="number"], input[type="tel"], input[name*="phone"]';
+        const hasPhone = await page.$(phoneSel);
+        if (hasPhone) {
+          await humanType(page, phoneSel, profile.phone);
+          console.log(`[AutoBook ElAl] ✓ Phone filled`);
+          await randomDelay(300, 700);
+        }
+      } catch (e) { console.log(`[AutoBook ElAl] Phone: ${e.message}`); }
+
+      // Scroll down to show we've filled the form
+      await page.mouse.wheel({ deltaY: 200 });
+      await randomDelay(1000, 2000);
+
+      // Click "Continue" / "Next" / "המשך"
+      const continueClicked = await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button, a[role="button"], [type="submit"]')];
+        const contBtn = btns.find(b => {
+          const t = (b.innerText || b.value || '').toLowerCase();
+          return t.includes('continue') || t.includes('next') || t.includes('המשך') || t.includes('proceed');
+        });
+        if (contBtn && !contBtn.disabled) { contBtn.click(); return true; }
+        return false;
+      });
+
+      if (continueClicked) {
+        console.log(`[AutoBook ElAl] ✓ Clicked continue — waiting for next step...`);
+        await randomDelay(5000, 8000);
+
+        // Check where we ended up
+        const nextPageText = await page.evaluate(() => (document.body && document.body.innerText || '').substring(0, 500));
+        console.log(`[AutoBook ElAl] Next page preview: "${nextPageText.substring(0, 200)}"`);
+
+        const reachedPayment = nextPageText.toLowerCase().includes('payment') ||
+                                nextPageText.toLowerCase().includes('credit') ||
+                                nextPageText.toLowerCase().includes('תשלום') ||
+                                nextPageText.toLowerCase().includes('כרטיס');
+
+        await page.close();
+        await stealthBrowser.close();
+
+        if (reachedPayment) {
+          // We got past the passenger form! But we stop before payment for safety.
+          return {
+            booked: false,
+            reason: `✅ Passenger details filled successfully! Reached payment page — complete payment via the link below`,
+            bookingLinks,
+            selectedFlight: bestFlight,
+            isLinkOnly: true,
+            stealthAttempted: true,
+            stealthReachedPayment: true,
+          };
+        } else {
+          return {
+            booked: false,
+            reason: `Passenger form submitted — could not confirm next step. Use the booking links to complete`,
+            bookingLinks,
+            selectedFlight: bestFlight,
+            isLinkOnly: true,
+            stealthAttempted: true,
+          };
+        }
+      } else {
+        console.log(`[AutoBook ElAl] Could not find continue button`);
+      }
+    } else {
+      console.log(`[AutoBook ElAl] No passenger form found on page`);
+      // Log what IS on the page for debugging
+      const inputCount = await page.evaluate(() => document.querySelectorAll('input, select, textarea').length);
+      const btnCount = await page.evaluate(() => document.querySelectorAll('button').length);
+      console.log(`[AutoBook ElAl] Page has ${inputCount} inputs, ${btnCount} buttons`);
+    }
+
+    await page.close();
+    await stealthBrowser.close();
+
+    // If we got here without being blocked but couldn't complete, still provide links
+    return {
+      booked: false,
+      reason: bestFlight
+        ? `Found ${bestFlight.airline} ${bestFlight.flightNum} at $${bestFlight.price} — stealth booking couldn't complete, use links below`
+        : `Flights available — stealth booking couldn't complete all steps, use links below`,
+      bookingLinks,
+      selectedFlight: bestFlight,
+      isLinkOnly: true,
+      stealthAttempted: true,
+    };
+
+  } catch (e) {
+    console.error(`[AutoBook ElAl] Stealth attempt error: ${e.message}`);
+    if (stealthBrowser) { try { await stealthBrowser.close(); } catch (_) {} }
+
+    // Fallback to links
+    return {
+      booked: false,
+      reason: bestFlight
+        ? `Found ${bestFlight.airline} ${bestFlight.flightNum} at $${bestFlight.price} — click the booking link to complete your reservation`
+        : `Flights available — click the booking link to book on El Al`,
+      bookingLinks,
+      selectedFlight: bestFlight,
+      isLinkOnly: true,
+      stealthAttempted: true,
+      stealthError: e.message,
+    };
+  }
 }
 
 // ─── Email notification ───────────────────────────────────

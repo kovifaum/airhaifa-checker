@@ -199,6 +199,7 @@ async function getProxyBrowser() {
       '--disable-infobars',
       '--window-size=1366,768',
       `--proxy-server=${proxyUrl}`,
+      '--ignore-certificate-errors',
     ],
   };
   if (executablePath) launchOpts.executablePath = executablePath;

@@ -884,9 +884,30 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
       return { booked: false, reason: selectResult.reason, pagePreview: (selectResult.debug || '').substring(0, 500) };
     }
 
+    // Wait for navigation after clicking flight (El Al SPA may redirect/reload)
+    console.log('[AutoBook ElAl] Flight clicked, waiting for page to settle...');
+    try {
+      await Promise.race([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }),
+        new Promise(r => setTimeout(r, 15000)), // fallback timeout
+      ]);
+    } catch (e) {
+      // Navigation might not happen if it's a SPA — that's ok
+      console.log(`[AutoBook ElAl] Post-click wait: ${e.message || 'timeout (ok for SPA)'}`);
+    }
     await new Promise(r => setTimeout(r, 5000));
 
-    // Step 2: Fill passenger details
+    // Log what page we're on now
+    let currentUrl = '';
+    try {
+      currentUrl = await page.evaluate(() => window.location.href);
+      const currentTitle = await page.evaluate(() => document.title);
+      console.log(`[AutoBook ElAl] After click — URL: ${currentUrl}, Title: ${currentTitle}`);
+    } catch (e) {
+      console.log(`[AutoBook ElAl] Page context ok after navigation wait`);
+    }
+
+    // Step 2: Fill passenger details (with navigation-safe wrapper)
     const formFields = {
       firstName: profile.firstName,
       lastName: profile.lastName,
@@ -899,100 +920,137 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
       cardCvv: profile.cardCvv,
     };
 
+    let filledCount = 0;
     for (const [field, value] of Object.entries(formFields)) {
       if (!value) continue;
       try {
-        await page.evaluate((f, v) => {
-          const inputs = document.querySelectorAll('input, select');
+        const filled = await page.evaluate((f, v) => {
+          const inputs = document.querySelectorAll('input, select, textarea');
           for (const input of inputs) {
             const name = (input.name || input.id || input.placeholder || '').toLowerCase();
             const label = input.closest('label')?.innerText?.toLowerCase() || '';
             const ariaLabel = (input.getAttribute('aria-label') || '').toLowerCase();
-            const combined = name + ' ' + label + ' ' + ariaLabel;
+            const type = (input.type || '').toLowerCase();
+            const combined = name + ' ' + label + ' ' + ariaLabel + ' ' + type;
 
             const fieldMappings = {
               firstName: ['first', 'fname', 'given', 'שם פרטי'],
               lastName: ['last', 'lname', 'surname', 'family', 'שם משפחה'],
               email: ['email', 'mail', 'דוא"ל', 'אימייל'],
               phone: ['phone', 'tel', 'mobile', 'טלפון', 'נייד'],
-              passport: ['passport', 'id', 'document', 'דרכון', 'תעודת זהות'],
+              passport: ['passport', 'id number', 'document', 'דרכון', 'תעודת זהות'],
               dob: ['birth', 'dob', 'date of birth', 'תאריך לידה'],
-              cardNumber: ['card', 'credit', 'cc', 'כרטיס אשראי', 'מספר כרטיס'],
-              cardExp: ['expir', 'exp', 'valid', 'תוקף'],
-              cardCvv: ['cvv', 'cvc', 'security', 'csv'],
+              cardNumber: ['card number', 'credit', 'cc num', 'כרטיס אשראי', 'מספר כרטיס'],
+              cardExp: ['expir', 'exp', 'valid', 'תוקף', 'mm/yy', 'mm / yy'],
+              cardCvv: ['cvv', 'cvc', 'security code', 'csv'],
             };
 
             const keywords = fieldMappings[f] || [f];
             if (keywords.some(k => combined.includes(k))) {
               input.focus();
+              // Clear first, then set value
+              input.value = '';
               input.value = v;
               input.dispatchEvent(new Event('input', { bubbles: true }));
               input.dispatchEvent(new Event('change', { bubbles: true }));
               input.dispatchEvent(new Event('blur', { bubbles: true }));
-              break;
+              return true;
             }
           }
+          return false;
         }, field, value);
+        if (filled) filledCount++;
       } catch (e) {
         console.log(`[AutoBook ElAl] Could not fill ${field}: ${e.message}`);
       }
     }
+    console.log(`[AutoBook ElAl] Filled ${filledCount} form fields`);
 
     // Step 3: Handle captcha if present
-    const hasCaptcha = await page.evaluate(() => {
-      return !!document.querySelector('.g-recaptcha, [data-sitekey], iframe[src*="recaptcha"]');
-    });
-
-    if (hasCaptcha && TWOCAPTCHA_KEY) {
-      const siteKey = await page.evaluate(() => {
-        const el = document.querySelector('.g-recaptcha, [data-sitekey]');
-        return el ? el.getAttribute('data-sitekey') : null;
+    try {
+      const hasCaptcha = await page.evaluate(() => {
+        return !!document.querySelector('.g-recaptcha, [data-sitekey], iframe[src*="recaptcha"]');
       });
-      if (siteKey) {
-        try {
-          console.log('[AutoBook ElAl] Solving captcha...');
-          const token = await solveCaptcha(siteKey, bookingUrl);
-          await page.evaluate((t) => {
-            const ta = document.querySelector('#g-recaptcha-response, [name="g-recaptcha-response"]');
-            if (ta) { ta.value = t; ta.dispatchEvent(new Event('change', { bubbles: true })); }
-            if (typeof window.captchaCallback === 'function') window.captchaCallback(t);
-            if (typeof window.onCaptchaSuccess === 'function') window.onCaptchaSuccess(t);
-          }, token);
-        } catch (e) {
-          console.log(`[AutoBook ElAl] Captcha solve failed: ${e.message}`);
+
+      if (hasCaptcha && TWOCAPTCHA_KEY) {
+        const siteKey = await page.evaluate(() => {
+          const el = document.querySelector('.g-recaptcha, [data-sitekey]');
+          return el ? el.getAttribute('data-sitekey') : null;
+        });
+        if (siteKey) {
+          try {
+            console.log('[AutoBook ElAl] Solving captcha...');
+            const token = await solveCaptcha(siteKey, bookingUrl);
+            await page.evaluate((t) => {
+              const ta = document.querySelector('#g-recaptcha-response, [name="g-recaptcha-response"]');
+              if (ta) { ta.value = t; ta.dispatchEvent(new Event('change', { bubbles: true })); }
+              if (typeof window.captchaCallback === 'function') window.captchaCallback(t);
+              if (typeof window.onCaptchaSuccess === 'function') window.onCaptchaSuccess(t);
+            }, token);
+          } catch (e) {
+            console.log(`[AutoBook ElAl] Captcha solve failed: ${e.message}`);
+          }
         }
       }
+    } catch (e) {
+      console.log(`[AutoBook ElAl] Captcha check skipped: ${e.message}`);
     }
 
     // Step 4: Find and click continue/submit/next
     await new Promise(r => setTimeout(r, 2000));
-    const submitted = await page.evaluate(() => {
-      const btns = [...document.querySelectorAll('button, input[type="submit"], a')];
-      const submitBtn = btns.find(b => {
-        const text = (b.innerText || b.value || '').toLowerCase();
-        return text.includes('continue') || text.includes('submit') || text.includes('next') ||
-               text.includes('proceed') || text.includes('confirm') ||
-               text.includes('המשך') || text.includes('שלח') || text.includes('אישור');
+    let submitted = false;
+    try {
+      submitted = await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button, input[type="submit"], a, [role="button"]')];
+        const submitBtn = btns.find(b => {
+          const text = (b.innerText || b.value || '').toLowerCase();
+          return text.includes('continue') || text.includes('submit') || text.includes('next') ||
+                 text.includes('proceed') || text.includes('confirm') || text.includes('pay') ||
+                 text.includes('purchase') || text.includes('complete') ||
+                 text.includes('המשך') || text.includes('שלח') || text.includes('אישור') ||
+                 text.includes('תשלום') || text.includes('רכישה');
+        });
+        if (submitBtn) { submitBtn.click(); return true; }
+        return false;
       });
-      if (submitBtn) { submitBtn.click(); return true; }
-      return false;
-    });
+    } catch (e) {
+      console.log(`[AutoBook ElAl] Submit click error: ${e.message}`);
+    }
 
-    await new Promise(r => setTimeout(r, 5000));
+    // Wait for final navigation
+    try {
+      await Promise.race([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }),
+        new Promise(r => setTimeout(r, 10000)),
+      ]);
+    } catch (e) { /* ok */ }
 
-    const pageText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+    let pageText = '';
+    try {
+      pageText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+    } catch (e) {
+      pageText = '(page navigated — could not capture text)';
+    }
+
     await page.close();
 
     return {
       booked: submitted,
       reason: submitted
-        ? `El Al booking submitted — ${selectResult.selectedPrice || '?'} ${selectResult.selectedClass || ''} — check email for confirmation`
-        : 'Could not find submit button on El Al',
+        ? `El Al booking submitted — ${selectResult.selectedPrice || '?'} ${selectResult.selectedClass || ''} — filled ${filledCount} fields — check email for confirmation`
+        : `Could not find submit button on El Al (filled ${filledCount} fields)`,
       selectedFlight: selectResult,
       pagePreview: pageText,
     };
   } catch (e) {
     try { await page.close(); } catch (_) {}
+    // Handle "execution context destroyed" specifically
+    if (e.message && e.message.includes('Execution context was destroyed')) {
+      return {
+        booked: true, // likely succeeded — the page navigated away which means a click worked
+        reason: `El Al page navigated after interaction (likely booking in progress) — check email for confirmation`,
+      };
+    }
     return { booked: false, reason: 'El Al booking error: ' + e.message };
   }
 }

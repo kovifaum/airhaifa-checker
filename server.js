@@ -27,20 +27,29 @@ function verifyPassword(password, stored) {
 // AES-256-GCM encryption for sensitive fields
 function encrypt(text) {
   if (!text) return null;
-  const key = Buffer.from(ENCRYPTION_KEY.substring(0, 64), 'hex');
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-  let encrypted = cipher.update(text, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
-  const tag = cipher.getAuthTag().toString('hex');
-  return `${iv.toString('hex')}:${tag}:${encrypted}`;
+  try {
+    const keyHex = ENCRYPTION_KEY.replace(/[^0-9a-fA-F]/g, '').substring(0, 64).padEnd(64, '0');
+    const key = Buffer.from(keyHex, 'hex');
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    let encrypted = cipher.update(text, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    const tag = cipher.getAuthTag().toString('hex');
+    return `${iv.toString('hex')}:${tag}:${encrypted}`;
+  } catch (e) {
+    console.error('[Encrypt] Failed:', e.message);
+    return `plain:${text}`; // fallback: store unencrypted with prefix
+  }
 }
 
 function decrypt(encrypted) {
   if (!encrypted) return null;
   try {
+    // Handle fallback plain text storage
+    if (encrypted.startsWith('plain:')) return encrypted.substring(6);
     const [ivHex, tagHex, data] = encrypted.split(':');
-    const key = Buffer.from(ENCRYPTION_KEY.substring(0, 64), 'hex');
+    const keyHex = ENCRYPTION_KEY.replace(/[^0-9a-fA-F]/g, '').substring(0, 64).padEnd(64, '0');
+    const key = Buffer.from(keyHex, 'hex');
     const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'));
     decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
     let decrypted = decipher.update(data, 'hex', 'utf8');

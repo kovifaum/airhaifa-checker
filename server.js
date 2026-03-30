@@ -757,22 +757,47 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
 
     await new Promise(r => setTimeout(r, 10000));
 
+    // Debug: log page title + body snippet so we can see what loaded
+    const pageDebug = await page.evaluate(() => {
+      return {
+        title: document.title,
+        url: window.location.href,
+        bodyLength: document.body.innerText.length,
+        bodySnippet: document.body.innerText.substring(0, 1500),
+        hasAccessDenied: document.body.innerText.toLowerCase().includes('access denied'),
+        allButtons: [...document.querySelectorAll('button, a[role="button"], [role="button"]')]
+          .map(b => (b.innerText || '').substring(0, 80)).filter(t => t.length > 1).slice(0, 20),
+      };
+    });
+    console.log(`[AutoBook ElAl] Page title: "${pageDebug.title}"`);
+    console.log(`[AutoBook ElAl] URL: ${pageDebug.url}`);
+    console.log(`[AutoBook ElAl] Body length: ${pageDebug.bodyLength} chars`);
+    console.log(`[AutoBook ElAl] Buttons found: ${JSON.stringify(pageDebug.allButtons)}`);
+    console.log(`[AutoBook ElAl] Body snippet: ${pageDebug.bodySnippet.substring(0, 500)}`);
+
+    if (pageDebug.hasAccessDenied || pageDebug.bodyLength < 200) {
+      await page.close();
+      return { booked: false, reason: 'El Al page did not load properly (blocked or empty)', pagePreview: pageDebug.bodySnippet.substring(0, 300) };
+    }
+
     // Step 1: Find and click the right flight based on cabin class and price
     const selectResult = await page.evaluate((pref, tPrice, mPrice) => {
-      const allElements = document.querySelectorAll('div, li, article, section, button, a, [role="button"]');
+      const allElements = document.querySelectorAll('div, li, article, section, button, a, [role="button"], span, td, tr');
       const candidates = [];
 
       for (const el of allElements) {
         const text = el.innerText || '';
-        if (text.length < 10 || text.length > 3000) continue;
+        if (text.length < 5 || text.length > 5000) continue;
 
-        const hasPrice = /\$[\d,]+|₪[\d,]+/.test(text);
-        const hasSelect = /(select|book|choose|בחר|הזמן)/i.test(text);
-        const isEconomy = /(economy|תיירים|coach)/i.test(text);
+        // Broader matching - look for prices in USD, ILS, or just numbers that look like prices
+        const hasPrice = /\$[\d,]+|₪[\d,]+|USD\s*[\d,]+|ILS\s*[\d,]+/i.test(text);
+        const hasSelect = /(select|book|choose|add|בחר|הזמן|הוסף)/i.test(text);
+        const hasFlightInfo = /(LY\s*\d|nonstop|direct|stop|economy|business|class|תיירים|עסקים|flight)/i.test(text);
+        const isEconomy = /(economy|תיירים|coach|lite|classic|flex)/i.test(text);
         const isBusiness = /(business|עסקים|premium)/i.test(text);
 
-        if (hasPrice || hasSelect) {
-          const priceMatch = text.match(/\$[\d,]+/);
+        if (hasPrice || hasSelect || hasFlightInfo) {
+          const priceMatch = text.match(/\$[\d,]+/) || text.match(/₪[\d,]+/);
           const priceNum = priceMatch ? parseFloat(priceMatch[0].replace(/[^0-9.]/g, '')) : null;
 
           candidates.push({
@@ -783,11 +808,18 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
             isEconomy,
             isBusiness,
             hasSelect,
+            hasPrice,
+            hasFlightInfo,
+            tagName: el.tagName,
           });
         }
       }
 
-      if (candidates.length === 0) return { clicked: false, reason: 'No flight options found on page' };
+      if (candidates.length === 0) {
+        // Return debug info about what IS on the page
+        const allText = document.body.innerText.substring(0, 2000);
+        return { clicked: false, reason: 'No flight options found on page', debug: allText };
+      }
 
       // Filter by cabin preference
       let filtered = candidates;
@@ -846,8 +878,9 @@ async function attemptAutoBookElAl(watch, flightResult, profile) {
     console.log(`[AutoBook ElAl] Flight selection: ${JSON.stringify(selectResult)}`);
 
     if (!selectResult.clicked) {
+      console.log(`[AutoBook ElAl] FAILED - debug page content: ${(selectResult.debug || '').substring(0, 800)}`);
       await page.close();
-      return { booked: false, reason: selectResult.reason };
+      return { booked: false, reason: selectResult.reason, pagePreview: (selectResult.debug || '').substring(0, 500) };
     }
 
     await new Promise(r => setTimeout(r, 5000));
